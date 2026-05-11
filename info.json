@@ -1,0 +1,10 @@
+{
+  "participants": ["Luan Martins"],
+  "social": [
+    "https://github.com/muanlartins",
+    "https://www.linkedin.com/in/luanmartinsalves/"
+  ],
+  "source-code-repo": "https://github.com/muanlartins/rinha-de-backend-2026",
+  "stack": ["go", "haproxy"],
+  "open_to_work": false
+}
