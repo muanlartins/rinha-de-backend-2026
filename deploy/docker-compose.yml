@@ -1,0 +1,63 @@
+# Submission-shape compose: this is what the rinha engine will run.
+# - No host-path mounts (the engine provides /resources externally).
+# - Strict 1 CPU / 350 MB total budget (0.10 + 0.45 + 0.45 = 1.00; 15 + 167 + 167 = 349 MB).
+# - linux/amd64 to match the Mac Mini Late 2014 test environment.
+#
+# For local benchmarking on Apple Silicon, layer benchmarks/_harness/go-local.override.yml
+# on top to mount our local references/ and bump LB memory for Rosetta overhead.
+services:
+  api-1:
+    image: muanlartins/rinha-de-backend-2026:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    platform: linux/amd64
+    container_name: rinha-go-api-1
+    environment:
+      - API_SOCKET=/var/run/rinha/api1.sock
+    volumes:
+      - socket-dir:/var/run/rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "167MB"
+
+  api-2:
+    image: muanlartins/rinha-de-backend-2026:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    platform: linux/amd64
+    container_name: rinha-go-api-2
+    environment:
+      - API_SOCKET=/var/run/rinha/api2.sock
+    volumes:
+      - socket-dir:/var/run/rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "167MB"
+
+  lb:
+    image: haproxy:3.0-alpine
+    platform: linux/amd64
+    container_name: rinha-go-lb
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - socket-dir:/var/run/rinha
+    command: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-db"]
+    ports:
+      - "9999:9999"
+    depends_on:
+      - api-1
+      - api-2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "15MB"
+
+volumes:
+  socket-dir: {}
