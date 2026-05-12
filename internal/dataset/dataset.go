@@ -20,25 +20,20 @@ const (
 )
 
 type Dataset struct {
-	// Vectors is the flat per-vector layout used during build and by
-	// brute-force tests. Nil after LoadIndex (runtime image).
+	// Vectors is the flat per-vector layout used during build only. Nil at
+	// runtime — the index file only stores the block-major data.
 	Vectors []int16
-	// Labels matches Vectors index-for-index (cluster-grouped flat order).
-	// Nil after LoadIndex.
+	// Labels matches Vectors index-for-index during build. Nil at runtime.
 	Labels []uint8
 	// Blocks holds all clusters' vectors in dim-major 8-wide block layout.
 	// Cluster c has data at ds.Blocks[c.BlockStart : c.BlockStart + c.NumBlocks*128].
 	Blocks []int16
 	// BlockLabels matches the block-major layout. Cluster c's labels live at
-	// ds.BlockLabels[c.LabelStart : c.LabelStart + c.NumBlocks*8]. Padding
-	// slots (positions ≥ c.Count within the last block) are unused.
+	// ds.BlockLabels[c.LabelStart : c.LabelStart + c.NumBlocks*8].
 	BlockLabels []uint8
 
-	Count           int
-	PartitionStarts [NumPartitions]uint32
-	PartitionCounts [NumPartitions]uint32
-	Partitions      []*Partition
-	IVF             []*IVFPartition
+	Count int
+	IVF   *IVFIndex
 }
 
 // LoadFromGzipJSON streams references.json.gz in two passes (count, then

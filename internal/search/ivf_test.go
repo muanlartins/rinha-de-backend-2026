@@ -25,7 +25,6 @@ func loadDS(tb testing.TB) *dataset.Dataset {
 		if err != nil {
 			tb.Fatalf("load: %v", err)
 		}
-		ds.Partition()
 		ds.BuildIVF()
 		sharedDS = ds
 	})
@@ -62,10 +61,7 @@ func TestIVFMatchesBruteForce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const sampleSize = 2000
-	if len(top.Entries) > sampleSize {
-		top.Entries = top.Entries[:sampleSize]
-	}
+	// Full 54100 — catches every borderline case where IVF diverges from BF.
 
 	mismatch := 0
 	for i, entry := range top.Entries {

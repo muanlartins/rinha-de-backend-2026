@@ -9,10 +9,10 @@ import (
 
 const (
 	indexMagic   uint32 = 0x52494E48 // "RINH"
-	indexVersion uint32 = 2          // v2 = block-major IVF
+	indexVersion uint32 = 3          // v3 = flat IVF, block-major data + centroids
 )
 
-// SaveIndex writes Blocks + Labels + per-partition IVF clusters (block-major).
+// SaveIndex writes Blocks + BlockLabels + IVF (clusters + centroid blocks).
 func (ds *Dataset) SaveIndex(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -20,63 +20,45 @@ func (ds *Dataset) SaveIndex(path string) error {
 	}
 	defer f.Close()
 
-	var hdr [32]byte
+	var hdr [40]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], indexMagic)
 	binary.LittleEndian.PutUint32(hdr[4:8], indexVersion)
 	binary.LittleEndian.PutUint64(hdr[8:16], uint64(ds.Count))
 	binary.LittleEndian.PutUint64(hdr[16:24], uint64(len(ds.Blocks)))
 	binary.LittleEndian.PutUint64(hdr[24:32], uint64(len(ds.BlockLabels)))
+	binary.LittleEndian.PutUint64(hdr[32:40], uint64(len(ds.IVF.CentroidBlocks)))
 	if _, err := f.Write(hdr[:]); err != nil {
 		return err
 	}
-
 	if _, err := f.Write(int16Bytes(ds.Blocks)); err != nil {
 		return err
 	}
 	if _, err := f.Write(ds.BlockLabels); err != nil {
 		return err
 	}
-	for k := 0; k < NumPartitions; k++ {
-		var pbuf [8]byte
-		binary.LittleEndian.PutUint32(pbuf[0:4], ds.PartitionStarts[k])
-		binary.LittleEndian.PutUint32(pbuf[4:8], ds.PartitionCounts[k])
-		if _, err := f.Write(pbuf[:]); err != nil {
-			return err
-		}
+	if _, err := f.Write(int16Bytes(ds.IVF.CentroidBlocks)); err != nil {
+		return err
 	}
 
-	for k := 0; k < NumPartitions; k++ {
-		pg := ds.IVF[k]
-		var cbuf [4]byte
-		var numClusters uint32
-		if pg != nil {
-			numClusters = uint32(len(pg.Clusters))
-		}
-		binary.LittleEndian.PutUint32(cbuf[:], numClusters)
-		if _, err := f.Write(cbuf[:]); err != nil {
+	var nc [4]byte
+	binary.LittleEndian.PutUint32(nc[:], uint32(len(ds.IVF.Clusters)))
+	if _, err := f.Write(nc[:]); err != nil {
+		return err
+	}
+	for _, c := range ds.IVF.Clusters {
+		var meta [16]byte
+		binary.LittleEndian.PutUint32(meta[0:4], c.BlockStart)
+		binary.LittleEndian.PutUint32(meta[4:8], c.LabelStart)
+		binary.LittleEndian.PutUint32(meta[8:12], c.Count)
+		binary.LittleEndian.PutUint32(meta[12:16], c.NumBlocks)
+		if _, err := f.Write(meta[:]); err != nil {
 			return err
 		}
-		if pg == nil {
-			continue
+		if _, err := f.Write(int16Bytes(c.BboxMin[:])); err != nil {
+			return err
 		}
-		for _, c := range pg.Clusters {
-			if _, err := f.Write(int16Bytes(c.Centroid[:])); err != nil {
-				return err
-			}
-			var meta [16]byte
-			binary.LittleEndian.PutUint32(meta[0:4], c.BlockStart)
-			binary.LittleEndian.PutUint32(meta[4:8], c.LabelStart)
-			binary.LittleEndian.PutUint32(meta[8:12], c.Count)
-			binary.LittleEndian.PutUint32(meta[12:16], c.NumBlocks)
-			if _, err := f.Write(meta[:]); err != nil {
-				return err
-			}
-			if _, err := f.Write(int16Bytes(c.BboxMin[:])); err != nil {
-				return err
-			}
-			if _, err := f.Write(int16Bytes(c.BboxMax[:])); err != nil {
-				return err
-			}
+		if _, err := f.Write(int16Bytes(c.BboxMax[:])); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -89,7 +71,7 @@ func LoadIndex(path string) (*Dataset, error) {
 	}
 	defer f.Close()
 
-	var hdr [32]byte
+	var hdr [40]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
 	}
@@ -104,12 +86,13 @@ func LoadIndex(path string) (*Dataset, error) {
 	count := int(binary.LittleEndian.Uint64(hdr[8:16]))
 	blocksLen := int(binary.LittleEndian.Uint64(hdr[16:24]))
 	labelsLen := int(binary.LittleEndian.Uint64(hdr[24:32]))
+	centroidsLen := int(binary.LittleEndian.Uint64(hdr[32:40]))
 
 	ds := &Dataset{
 		Count:       count,
 		Blocks:      make([]int16, blocksLen),
 		BlockLabels: make([]uint8, labelsLen),
-		IVF:         make([]*IVFPartition, NumPartitions),
+		IVF:         &IVFIndex{CentroidBlocks: make([]int16, centroidsLen)},
 	}
 	if _, err := io.ReadFull(f, int16Bytes(ds.Blocks)); err != nil {
 		return nil, fmt.Errorf("read blocks: %w", err)
@@ -117,45 +100,32 @@ func LoadIndex(path string) (*Dataset, error) {
 	if _, err := io.ReadFull(f, ds.BlockLabels); err != nil {
 		return nil, fmt.Errorf("read blocklabels: %w", err)
 	}
-	for k := 0; k < NumPartitions; k++ {
-		var pbuf [8]byte
-		if _, err := io.ReadFull(f, pbuf[:]); err != nil {
-			return nil, fmt.Errorf("read partition %d: %w", k, err)
-		}
-		ds.PartitionStarts[k] = binary.LittleEndian.Uint32(pbuf[0:4])
-		ds.PartitionCounts[k] = binary.LittleEndian.Uint32(pbuf[4:8])
+	if _, err := io.ReadFull(f, int16Bytes(ds.IVF.CentroidBlocks)); err != nil {
+		return nil, fmt.Errorf("read centroidblocks: %w", err)
 	}
-	for k := 0; k < NumPartitions; k++ {
-		var cbuf [4]byte
-		if _, err := io.ReadFull(f, cbuf[:]); err != nil {
-			return nil, fmt.Errorf("read partition %d numClusters: %w", k, err)
+
+	var nc [4]byte
+	if _, err := io.ReadFull(f, nc[:]); err != nil {
+		return nil, fmt.Errorf("read numClusters: %w", err)
+	}
+	numClusters := int(binary.LittleEndian.Uint32(nc[:]))
+	ds.IVF.Clusters = make([]Cluster, numClusters)
+	for ci := 0; ci < numClusters; ci++ {
+		c := &ds.IVF.Clusters[ci]
+		var meta [16]byte
+		if _, err := io.ReadFull(f, meta[:]); err != nil {
+			return nil, fmt.Errorf("read cluster meta %d: %w", ci, err)
 		}
-		numClusters := int(binary.LittleEndian.Uint32(cbuf[:]))
-		if numClusters == 0 {
-			continue
+		c.BlockStart = binary.LittleEndian.Uint32(meta[0:4])
+		c.LabelStart = binary.LittleEndian.Uint32(meta[4:8])
+		c.Count = binary.LittleEndian.Uint32(meta[8:12])
+		c.NumBlocks = binary.LittleEndian.Uint32(meta[12:16])
+		if _, err := io.ReadFull(f, int16Bytes(c.BboxMin[:])); err != nil {
+			return nil, fmt.Errorf("read bboxMin %d: %w", ci, err)
 		}
-		pg := &IVFPartition{Clusters: make([]Cluster, numClusters)}
-		for ci := 0; ci < numClusters; ci++ {
-			c := &pg.Clusters[ci]
-			if _, err := io.ReadFull(f, int16Bytes(c.Centroid[:])); err != nil {
-				return nil, fmt.Errorf("read centroid %d: %w", ci, err)
-			}
-			var meta [16]byte
-			if _, err := io.ReadFull(f, meta[:]); err != nil {
-				return nil, fmt.Errorf("read cluster meta %d: %w", ci, err)
-			}
-			c.BlockStart = binary.LittleEndian.Uint32(meta[0:4])
-			c.LabelStart = binary.LittleEndian.Uint32(meta[4:8])
-			c.Count = binary.LittleEndian.Uint32(meta[8:12])
-			c.NumBlocks = binary.LittleEndian.Uint32(meta[12:16])
-			if _, err := io.ReadFull(f, int16Bytes(c.BboxMin[:])); err != nil {
-				return nil, fmt.Errorf("read bboxMin %d: %w", ci, err)
-			}
-			if _, err := io.ReadFull(f, int16Bytes(c.BboxMax[:])); err != nil {
-				return nil, fmt.Errorf("read bboxMax %d: %w", ci, err)
-			}
+		if _, err := io.ReadFull(f, int16Bytes(c.BboxMax[:])); err != nil {
+			return nil, fmt.Errorf("read bboxMax %d: %w", ci, err)
 		}
-		ds.IVF[k] = pg
 	}
 	return ds, nil
 }
