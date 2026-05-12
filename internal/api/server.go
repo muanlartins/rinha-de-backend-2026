@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
+	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/search"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/vector"
 )
@@ -93,16 +94,23 @@ var fraudResponses = [6][]byte{
 
 type Handler struct {
 	ready atomic.Bool
-	ds    atomic.Pointer[dataset.Dataset]
+	idx   atomic.Pointer[ivf.IVFIndex]
 }
 
 func NewHandler() *Handler {
 	return &Handler{}
 }
 
-func (h *Handler) SetDataset(ds *dataset.Dataset) {
-	h.ds.Store(ds)
+func (h *Handler) SetIndex(idx *ivf.IVFIndex) {
+	h.idx.Store(idx)
 	h.ready.Store(true)
+}
+
+// scratchPool keeps per-request IVF scratch buffers (~17 KB each) off the
+// per-request alloc path. With GOMAXPROCS(1) and one in-flight scratch per
+// request, the pool typically holds 1-2 entries.
+var scratchPool = sync.Pool{
+	New: func() any { return new(search.IVFScratch) },
 }
 
 // MarkReady flips ready without a dataset for the smoke-only path (no
@@ -150,8 +158,8 @@ func (h *Handler) fraudScoreRaw(body []byte) []byte {
 	if !h.ready.Load() {
 		return readyNotYet
 	}
-	ds := h.ds.Load()
-	if ds == nil {
+	idx := h.idx.Load()
+	if idx == nil {
 		return rawhttpResponses[0]
 	}
 
@@ -170,21 +178,31 @@ func (h *Handler) fraudScoreRaw(body []byte) []byte {
 	if !vector.VectorizeFast(body, &query) {
 		return rawhttpResponses[0]
 	}
-	frauds := search.FraudCount(&query, ds)
+	var qi [dataset.Dims]int16
+	var qf [dataset.Dims]float32
+	for d := 0; d < dataset.Dims; d++ {
+		qi[d] = query[d]
+		qf[d] = float32(query[d])
+	}
+	scratch := scratchPool.Get().(*search.IVFScratch)
+	frauds := search.FraudCountIVF(&qf, &qi, idx, scratch)
+	scratchPool.Put(scratch)
 	return rawhttpResponses[frauds]
 }
 
 func (h *Handler) debugInfoRaw() []byte {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	ds := h.ds.Load()
-	var count int
-	if ds != nil {
-		count = ds.Count
+	idx := h.idx.Load()
+	var count uint32
+	var k uint32
+	if idx != nil {
+		count = idx.N
+		k = idx.K
 	}
 	body := fmt.Sprintf(
-		`{"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d,"shed_slots":%d,"shed_timeout_ms":%d,"shed_count":%d}`,
-		count,
+		`{"dataset_count":%d,"ivf_k":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d,"shed_slots":%d,"shed_timeout_ms":%d,"shed_count":%d}`,
+		count, k,
 		h.ready.Load(),
 		m.HeapInuse/(1<<20),
 		m.TotalAlloc/(1<<20),
@@ -204,10 +222,10 @@ func (h *Handler) debugInfoRaw() []byte {
 func (h *Handler) handleDebugInfo(w http.ResponseWriter, _ *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	ds := h.ds.Load()
-	var count int
-	if ds != nil {
-		count = ds.Count
+	idx := h.idx.Load()
+	var count uint32
+	if idx != nil {
+		count = idx.N
 	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w,
@@ -255,8 +273,8 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		bodyBufPool.Put(bufp)
 	}()
 
-	ds := h.ds.Load()
-	if ds == nil {
+	idx := h.idx.Load()
+	if idx == nil {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(fraudResponses[0])
 		return
@@ -264,14 +282,19 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 
 	var query [dataset.Stride]int16
 	if !vector.VectorizeFast(body, &query) {
-		// HTTP 5xx weighs 5 in E; a misclassification weighs 1 or 3. On a
-		// parse miss, prefer approved=true / score=0 over a 5xx.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(fraudResponses[0])
 		return
 	}
-
-	frauds := search.FraudCount(&query, ds)
+	var qi [dataset.Dims]int16
+	var qf [dataset.Dims]float32
+	for d := 0; d < dataset.Dims; d++ {
+		qi[d] = query[d]
+		qf[d] = float32(query[d])
+	}
+	scratch := scratchPool.Get().(*search.IVFScratch)
+	frauds := search.FraudCountIVF(&qf, &qi, idx, scratch)
+	scratchPool.Put(scratch)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(fraudResponses[frauds])
 }

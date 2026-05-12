@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
+	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 )
 
-// loadDataset returns a Dataset built from the local mirror, or nil if it
-// isn't available (CI / fresh checkout without the references submodule).
-func loadDataset(tb testing.TB) *dataset.Dataset {
+// loadIVFIndex builds an IVF index from the local references mirror.
+// Returns nil if the references are unavailable (CI / fresh checkout).
+func loadIVFIndex(tb testing.TB) *ivf.IVFIndex {
 	tb.Helper()
 	path := "../../references/rinha-official/resources/references.json.gz"
 	if _, err := os.Stat(path); err != nil {
@@ -24,8 +25,14 @@ func loadDataset(tb testing.TB) *dataset.Dataset {
 	if err != nil {
 		tb.Fatalf("load: %v", err)
 	}
-	ds.BuildGrid()
-	return ds
+	centroids := ivf.TrainKMeans(ds.Vectors, ds.Count)
+	assign := ivf.AssignAll(ds.Vectors, ds.Count, &centroids)
+	ivf.SetLabelSource(ds.Labels)
+	idx, err := ivf.Build(ds.Vectors, ds.Count, &centroids, assign)
+	if err != nil {
+		tb.Fatalf("build: %v", err)
+	}
+	return idx
 }
 
 // loadHandlerPayloads pulls request bodies out of the test-data file. Only
@@ -58,11 +65,11 @@ func loadHandlerPayloads(tb testing.TB, n int) [][]byte {
 }
 
 // BenchmarkHandlerFraudScore runs the full /fraud-score handler end-to-end:
-// body read, fast parse, grid search, write response. Used both as a perf
+// body read, fast parse, IVF search, write response. Used both as a perf
 // number and for `-cpuprofile` capture to feed PGO.
 func BenchmarkHandlerFraudScore(b *testing.B) {
-	ds := loadDataset(b)
-	if ds == nil {
+	idx := loadIVFIndex(b)
+	if idx == nil {
 		return
 	}
 	payloads := loadHandlerPayloads(b, 1024)
@@ -71,7 +78,7 @@ func BenchmarkHandlerFraudScore(b *testing.B) {
 	}
 
 	h := NewHandler()
-	h.SetDataset(ds)
+	h.SetIndex(idx)
 
 	w := httptest.NewRecorder()
 	b.ResetTimer()
@@ -79,8 +86,6 @@ func BenchmarkHandlerFraudScore(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		body := payloads[i&1023]
 		req := httptest.NewRequest("POST", "/fraud-score", bytes.NewReader(body))
-		// httptest's NewRecorder zeroes between calls; reuse the body buffer
-		// by resetting the recorder body.
 		w.Body = nil
 		h.ServeHTTP(w, req)
 		_, _ = io.Copy(io.Discard, w.Result().Body)
