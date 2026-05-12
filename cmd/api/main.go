@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/api"
-	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
+	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 )
 
 const indexPath = "/resources/index.bin"
@@ -36,16 +36,22 @@ func main() {
 		log.Printf("WARN: %s not found; coming up in stub mode", indexPath)
 		handler.MarkReady()
 	} else {
-		log.Printf("loading pre-built index from %s ...", indexPath)
+		log.Printf("loading IVF index from %s ...", indexPath)
 		t0 := time.Now()
-		ds, err := dataset.LoadIndex(indexPath)
+		f, err := os.Open(indexPath)
+		if err != nil {
+			log.Fatalf("open index: %v", err)
+		}
+		idx, err := ivf.Load(f)
+		f.Close()
 		if err != nil {
 			log.Fatalf("load index: %v", err)
 		}
-		log.Printf("index loaded: %d vectors in %s", ds.Count, time.Since(t0))
+		log.Printf("index loaded: N=%d K=%d blocks=%d in %s",
+			idx.N, idx.K, idx.Blocks, time.Since(t0))
 
 		runtime.GC()
-		handler.SetDataset(ds)
+		handler.SetIndex(idx)
 	}
 
 	select {}
