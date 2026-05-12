@@ -21,7 +21,7 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 10 | + GOAMD64=v3 + PGO + sort cells by dist-to-centroid | Mac Mini: **3712** | Mac Mini 100.21ms | Three low-risk wins bundled, validated on Mac Mini via issue [#3727](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/3727). (1) Haswell baseline (SSE4.2/AVX/AVX2/FMA3) — default v1 leaves SSE off entirely. (2) Profile-guided optimization with a profile captured from the local handler bench and checked in as `cmd/api/default.pgo`. (3) Per-cell sort by squared distance to centroid at index build time — Josiney's "Golden Optimization". Net **+647** over phase 9 (3065). FP=0, FN=1, Err=1. Picked up 1 Err (likely queue-timeout under burst). |
 | 11 | int8 quantization | local: regression, NOT pushed | n/a | Tried per-dim linear int8 (scale 127, sentinel -127). `TestGridFullDataset` showed **FP=51, FN=62** — projected −1080 detection points. Local-bench latency win only 10 %. Net negative in every Haswell scenario. Reverted. Detailed in lecture 06. |
 | 12 | float32 with mmap-shared-tmpfs | local: regression, NOT pushed | n/a | Tried float32 storage to eliminate the 1 FN. Empirically **the 1 FN survives float32** — it's not a quantization artifact, it's a structural mismatch between our search and rinha's label generator (probably parser-related, on test-data.json entry 5472). Plus latency regressed 18 % locally (cache pressure from 84 → 168 MB). Reverted. Built `LoadIndexMmap` + cgroup-friendly shared-tmpfs design for archive purposes — usable if some future change wants the memory headroom. Detailed in lecture 06. |
-| 13 | Load shedder (1-slot semaphore + 3 ms timeout) | TBD | TBD | Josiney's tail-latency trick. `SHED_SLOTS=4`, `SHED_TIMEOUT_MS=3` exposed as env vars in compose so we can sweep without rebuilding. Shed response is `fraudResponses[0]` ("approved", fraud_score=0). Pure additive layer in `fraudScoreRaw`; phase 10 algorithm unchanged. Detailed in lecture 07. |
+| 13 | Load shedder (`SHED_SLOTS=4`, `SHED_TIMEOUT_MS=3`) | Mac Mini: **3823** | Mac Mini 99.25ms | Net **+110** over phase 10 via issue [#3768](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/3768), but not where expected. p99 was essentially unchanged (99 vs 100 ms) — shedder rarely fired. Win came from **eliminating the 1 Err** phase 10 picked up (Err weight 5 vs FN weight 3 → −106 detection penalty saved). Detection now saturated at **2819/3000 = max modulo the 1 structural FN**. p99_score still 1003/3000, all remaining headroom there. |
 
 ## What I learned
 
@@ -120,12 +120,12 @@ Without these, ~1-3 requests per test would time out at 2001 ms during the k6 ra
 
 ## What's next (open questions, post-phase-13)
 
-After three rounds of Mac Mini testing (#3709 = 3065, #3727 = 3712, #3xxx-pending = phase 13), the score landscape is:
+After three rounds of Mac Mini testing (#3709 = 3065, #3727 = 3712, #3768 = 3823), the score landscape is:
 
 ```
-final_score 3712 / 6000
-├── det_score 2714 / 3000  (saturated modulo 1 structural FN + 1 random Err)
-└── p99_score  999 / 3000  (all remaining headroom is here — 100ms → 1ms = +2001)
+final_score 3823 / 6000  (top-cluster target: 5500-5900)
+├── det_score 2819 / 3000  (SATURATED at max modulo the 1 structural FN)
+└── p99_score 1003 / 3000  (all remaining headroom is here — 100ms → 1ms = +2000)
 ```
 
 Things we've **already eliminated** (don't retry without new evidence):
