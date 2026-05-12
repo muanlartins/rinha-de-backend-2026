@@ -115,8 +115,6 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		bodyBufPool.Put(bufp)
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-
 	ds := h.ds.Load()
 	if ds == nil {
 		w.WriteHeader(http.StatusOK)
