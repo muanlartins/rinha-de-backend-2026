@@ -25,8 +25,8 @@ func main() {
 	log.Printf("load: %d vectors in %s", ds.Count, time.Since(t0))
 
 	t1 := time.Now()
-	ds.BuildIVF()
-	log.Printf("build-ivf: %s", time.Since(t1))
+	ds.BuildGrid()
+	log.Printf("build-grid: %s", time.Since(t1))
 
 	t3 := time.Now()
 	if err := ds.SaveIndex(out); err != nil {

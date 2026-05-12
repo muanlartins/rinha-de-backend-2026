@@ -24,7 +24,6 @@ func loadDataset(tb testing.TB) *dataset.Dataset {
 	if err != nil {
 		tb.Fatalf("load: %v", err)
 	}
-	ds.Partition()
 	ds.BuildGrid()
 	return ds
 }

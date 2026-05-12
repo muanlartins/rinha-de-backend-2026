@@ -9,37 +9,74 @@ import (
 )
 
 const (
+	// Dims is the vector arity used everywhere on the hot path.
 	Dims = 14
-	// Stride pads each vector to 16 int16s (32 bytes) so the AVX2 kernel can
-	// run VPSUBW + VPMADDWD over a full YMM register with no masking. Dims
-	// 14 and 15 are reserved padding and always 0.
-	Stride       = 16
+	// Stride is the per-vector stride in the flat int16 slab. We do NOT pad —
+	// the early-exit kernel touches dims in order and bails before the end on
+	// most candidates, so the 13 % bandwidth saving from dropping the int16
+	// padding outweighs any SIMD-friendliness we lose (and the SIMD kernel is
+	// gone anyway — see docs/lectures/05-grid-revival.md).
+	Stride       = 14
 	QuantScale   = 32000
 	SentinelInt  = -32000
 	SentinelReal = -1.0
+
+	// NumPartitions is fixed at 32 = 2^5 (dims 9, 10, 11, sentinel-5,
+	// sentinel-6). One key per query → one partition scanned per query.
+	NumPartitions = 32
 )
 
-type Dataset struct {
-	// Vectors is the flat per-vector layout used during build only. Nil at
-	// runtime — the index file only stores the block-major data.
-	Vectors []int16
-	// Labels matches Vectors index-for-index during build. Nil at runtime.
-	Labels []uint8
-	// Blocks holds all clusters' vectors in dim-major 8-wide block layout.
-	// Cluster c has data at ds.Blocks[c.BlockStart : c.BlockStart + c.NumBlocks*128].
-	Blocks []int16
-	// BlockLabels matches the block-major layout. Cluster c's labels live at
-	// ds.BlockLabels[c.LabelStart : c.LabelStart + c.NumBlocks*8].
-	BlockLabels []uint8
+// Grid bin configuration. Same shape QRust converged on (`[1,128]`-ish from
+// their search-s3b sweep transferred to int16 with our partition split).
+// Dims 0 / 12 / 7 chosen because none of them are constant in any partition:
+//   - dim 0 (amount): high variance, never constant.
+//   - dim 12 (mcc_risk): seven distinct values per the lookup table → fine.
+//   - dim 7 (km_from_home): continuous, never the sentinel dim.
+const (
+	GridDim0    = 0
+	GridDim1    = 12
+	GridDim2    = 7
+	BinsD0      = 16
+	BinsD1      = 8
+	BinsD2      = 8
+	BinsTotal   = BinsD0 * BinsD1 * BinsD2 // 1024
+	BoundsCount = (BinsD0 - 1) + (BinsD1 - 1) + (BinsD2 - 1)
+)
 
-	Count int
-	IVF   *IVFIndex
+// Cell is the unit the inner search loop iterates over.
+type Cell struct {
+	Start  uint32 // offset in vectors (relative to partition start)
+	Count  uint32
+	BboxMn [Dims]int16
+	BboxMx [Dims]int16
 }
 
-// LoadFromGzipJSON streams references.json.gz in two passes (count, then
-// fill) so Vectors and Labels are sized exactly. Per-entry alloc: zero.
-// Stdlib encoding/json over 3M entries allocates ~300 MB transient, which
-// overshoots the 167 MB cgroup before we serve a single request.
+// PartitionGrid holds the grid metadata for one of the 32 partitions.
+// Only the non-empty cells are stored; CellKeyToIdx maps from the 10-bit
+// cellKey (0..1023) to the index in Cells, or -1 for empty cells.
+type PartitionGrid struct {
+	Cells     []Cell
+	Bounds    [BoundsCount]int16
+	NumCells  uint32
+}
+
+// Dataset is the runtime view of the prepared index. After LoadIndex:
+//   - Vectors and Labels are populated and live for process lifetime.
+//   - Per-partition start / count and grid metadata index into Vectors.
+type Dataset struct {
+	Vectors []int16 // length = Count * Stride
+	Labels  []uint8 // length = Count
+
+	Count            int
+	PartitionStarts  [NumPartitions]uint32
+	PartitionCounts  [NumPartitions]uint32
+	Grids            [NumPartitions]PartitionGrid
+}
+
+// LoadFromGzipJSON is the build-time entry point. It streams
+// `references.json.gz`, quantizes floats → int16, and produces a Dataset
+// with Vectors and Labels filled in source order (no partition / grid yet —
+// call BuildGrid afterwards).
 func LoadFromGzipJSON(path string) (*Dataset, error) {
 	count, err := scan(path, nil)
 	if err != nil {
@@ -87,6 +124,29 @@ func quantize(v float32) int16 {
 		return QuantScale
 	}
 	return int16(v*QuantScale + 0.5)
+}
+
+// PartitionKey computes the 5-bit partition key from a quantized vector.
+// Identical formula for both build-time references and runtime queries —
+// dataset and search agree on layout iff they agree on this function.
+func PartitionKey(v []int16) uint8 {
+	var k uint8
+	if v[9] != 0 {
+		k |= 1
+	}
+	if v[10] != 0 {
+		k |= 2
+	}
+	if v[11] != 0 {
+		k |= 4
+	}
+	if v[5] == SentinelInt {
+		k |= 8
+	}
+	if v[6] == SentinelInt {
+		k |= 16
+	}
+	return k
 }
 
 func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
@@ -147,7 +207,6 @@ func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 	}
 }
 
-// readUntil works because our two keys have no proper-prefix-equal-suffix.
 func readUntil(br *bufio.Reader, needle string) error {
 	nlen := len(needle)
 	matched := 0

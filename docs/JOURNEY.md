@@ -17,6 +17,7 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 6 | Custom HTTP server (drop net/http) | 3452 | 232ms | No meaningful change on Mac Mini. The HTTP layer wasn't the bottleneck. |
 | 7 | Flat IVF K=4096 with Lloyd k-means (rewrite) | local: 2888 | local 456ms | **Regression.** Lloyd k-means produces unbalanced clusters with meaningless centroids on discrete dims (online/card/unknown sit at intermediate 16000 values). 65 FP + 61 FN crossing threshold on local. |
 | 8 | Flat IVF K=8192 with balancedSplit + ambiguity expansion | TBD | TBD | Replaced Lloyd with josehenrique-dev-Go's recursive median-split on max-variance dim. Exactly balanced clusters. nprobe=32 fast + nprobe=128 on borderline. Local FP=4 FN=8. |
+| 9 | **Grid revival** — exact partitioned grid + AABB LB pruning + scalar early-exit (Mac Mini TBD) | local: **3911** | local 80.91ms | Reverted to the algorithm of phase 1, now properly engineered: 32 partitions × ≤1024 cells × percentile-binned grid dims (0, 12, 7) × per-cell AABB. Drops the SIMD kernel (early-exit doesn't compose with 8-wide block ops). Restores exact KNN: **FP=0, FN=1, Err=0** locally — only the structural quantization FN remains. +1023 points over phase 8 (flat-IVF). See lecture 05. |
 
 ## What I learned
 
@@ -115,9 +116,20 @@ Without these, ~1-3 requests per test would time out at 2001 ms during the k6 ra
 
 ## What's next (open questions)
 
-1. **Float32 storage**: eliminates the 1 quantization FN, plus ~doubles kernel throughput via VFMADD231PS. Memory cost is 168 MB — just over our 167 MB cgroup. Doable if we eliminate other overhead.
-2. **PGO with a real profile from the rinha bot**: probably 5-15% across the board. Need to figure out how to capture profiles from the bot.
-3. **Pre-sort cluster vectors by some discriminating dim** so early-exit kicks in faster.
-4. **Variance-ordered dim layout in the asm kernel** (top-Go does this — STEP(10), STEP(12), STEP(4) rather than STEP(0..15) in order — to make partial sums exceed the threshold faster).
+After phase 9 (grid revival) the loss landscape changed shape. With detection essentially locked at FP=0/FN=1/Err=0, every remaining point comes from p99. Order of return now:
 
-The fundamental insight from this journey: **the top of the leaderboard is achieved by getting many small things right, not by one heroic optimization**. The compose-level tweaks (pull_policy, ulimits, seccomp) gained us ~150 points. The algorithm change (k-means → balancedSplit) gained us ~300 expected points. The block-major SIMD kernel was a wash on the Mac Mini despite being 8× wider locally. Top Go submissions clustering between 5500-5900 final are doing **all** of these well, not picking one.
+1. **Submission compose tweaks** (`pull_policy: always`, `ulimits`, `seccomp:unconfined`) — re-applied to `submission/docker-compose.yml`. Phase 5 measured ~+150 points from these on the Mac Mini. The submission branch currently lacks them.
+2. **Push the new image to Docker Hub and open a `rinha/test` issue.** The local 80.91 ms p99 is a Rosetta-and-k6-contention number; the Mac Mini's behavior is shape-different (queue contention vs CPU contention) and only the bot will tell us the real value. Until we have a Mac Mini number, further local optimization is shadow-boxing.
+3. **Variance-ordered dim layout in the early-exit kernel.** We already put dims 0, 12, 7 first in the scan (high-variance), but inside the partition the *next-best discriminator* could be different. Not worth tuning until we have a Mac Mini number for comparison.
+4. **Float32 storage** to eliminate the 1 quantization FN. Cost: 168 MB > 167 MB cgroup, so requires shedding ~5 MB elsewhere. Payoff: +180 detection points. Marginal value vs latency work.
+5. **PGO** with a profile captured on the rinha bot. ~5–15 % across the board, but again needs a Mac Mini number to validate.
+
+The fundamental insight from this journey: **the top of the leaderboard is achieved by getting many small things right, not by one heroic optimization**. The compose-level tweaks (pull_policy, ulimits, seccomp) gained us ~150 points. The algorithm change (k-means → balancedSplit → grid revival) was net +700 points end-to-end. The block-major SIMD kernel was a wash on the Mac Mini despite being 8× wider locally and was retired in phase 9. Top Go submissions clustering between 5500-5900 final are doing **all** of these well, not picking one.
+
+## Phase 9 — what changed and what we learned
+
+- **Approximation does not pay under this scoring.** The flat-IVF detour cost us ~600 points on `score_det` (FP=4, FN=4 vs FP=0, FN=1). The supposed latency win never materialized because IVF without per-cell pruning scanned the *same* ~11700 vectors regardless of how close they were to the query, while grid+LB scans ~3000-6000 *and* most of them only the first 2-3 dims (early-exit).
+- **The right SIMD-vs-scalar question is "what shape is the inner loop?", not "is the CPU faster at vector ops?".** SIMD wins when every candidate runs to completion. Early-exit means most candidates abort at dim 1-2 — and you can't abort half the lanes in a SIMD block. We retired `blockScan8AVX2`. The cost of dropping it locally is negligible; the maintenance cost was real.
+- **The partition layout is sparser than the bit count suggests.** 32 partition keys exist; only 12 have data. `online + card_present` never coexist; sentinel-5-XOR-sentinel-6 never coexist (transactions either have full last-tx data or none). So we really have *6 non-sentinel + 6 double-sentinel = 12 working partitions*. The other 20 are dead code paths.
+- **Cycle-sort direction trap is real.** The in-place permutation routine for the partition step was the bug-prone part of the rebuild. The right form: swap row `i` with row `target[i]`, *also swap their target entries*, repeat until `target[i] == i`. Walking the *inverse* permutation produces near-correct results that are wrong in subtle ways.
+- **Bench harness noise is huge.** Same image, different runs of the local k6 bench produce p99 = 80 ms one minute and p99 = 800 ms the next, depending on which CPU cores k6 lands on. Single-run numbers are barely signal. The Mac Mini will be even noisier per the phase-1-1b note above.

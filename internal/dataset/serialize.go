@@ -9,10 +9,15 @@ import (
 
 const (
 	indexMagic   uint32 = 0x52494E48 // "RINH"
-	indexVersion uint32 = 3          // v3 = flat IVF, block-major data + centroids
+	indexVersion uint32 = 4          // v4 = partition + grid (post-IVF revival)
 )
 
-// SaveIndex writes Blocks + BlockLabels + IVF (clusters + centroid blocks).
+// SaveIndex writes:
+//   [header] [vectors] [labels] [per-partition grids]
+//
+// Each grid record is variable-length (cells × ~60 B). The header includes
+// total counts for sanity; per-partition record-length is implicit from the
+// numCells field.
 func (ds *Dataset) SaveIndex(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -20,44 +25,54 @@ func (ds *Dataset) SaveIndex(path string) error {
 	}
 	defer f.Close()
 
-	var hdr [40]byte
+	// Header: 16 B magic+version+count+_ + 32 starts + 32 counts.
+	var hdr [16 + 4*NumPartitions*2]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], indexMagic)
 	binary.LittleEndian.PutUint32(hdr[4:8], indexVersion)
 	binary.LittleEndian.PutUint64(hdr[8:16], uint64(ds.Count))
-	binary.LittleEndian.PutUint64(hdr[16:24], uint64(len(ds.Blocks)))
-	binary.LittleEndian.PutUint64(hdr[24:32], uint64(len(ds.BlockLabels)))
-	binary.LittleEndian.PutUint64(hdr[32:40], uint64(len(ds.IVF.CentroidBlocks)))
+	for p := 0; p < NumPartitions; p++ {
+		binary.LittleEndian.PutUint32(hdr[16+p*4:], ds.PartitionStarts[p])
+		binary.LittleEndian.PutUint32(hdr[16+NumPartitions*4+p*4:], ds.PartitionCounts[p])
+	}
 	if _, err := f.Write(hdr[:]); err != nil {
 		return err
 	}
-	if _, err := f.Write(int16Bytes(ds.Blocks)); err != nil {
+
+	// Vectors + Labels.
+	if _, err := f.Write(int16Bytes(ds.Vectors)); err != nil {
 		return err
 	}
-	if _, err := f.Write(ds.BlockLabels); err != nil {
-		return err
-	}
-	if _, err := f.Write(int16Bytes(ds.IVF.CentroidBlocks)); err != nil {
+	if _, err := f.Write(ds.Labels); err != nil {
 		return err
 	}
 
-	var nc [4]byte
-	binary.LittleEndian.PutUint32(nc[:], uint32(len(ds.IVF.Clusters)))
-	if _, err := f.Write(nc[:]); err != nil {
-		return err
-	}
-	for _, c := range ds.IVF.Clusters {
-		var meta [16]byte
-		binary.LittleEndian.PutUint32(meta[0:4], c.BlockStart)
-		binary.LittleEndian.PutUint32(meta[4:8], c.LabelStart)
-		binary.LittleEndian.PutUint32(meta[8:12], c.Count)
-		binary.LittleEndian.PutUint32(meta[12:16], c.NumBlocks)
-		if _, err := f.Write(meta[:]); err != nil {
+	// Per-partition grid records.
+	for p := 0; p < NumPartitions; p++ {
+		g := &ds.Grids[p]
+		// numCells (u32) + bounds (BoundsCount × i16)
+		var head [4 + BoundsCount*2]byte
+		binary.LittleEndian.PutUint32(head[0:4], g.NumCells)
+		for b := 0; b < BoundsCount; b++ {
+			binary.LittleEndian.PutUint16(head[4+b*2:], uint16(g.Bounds[b]))
+		}
+		if _, err := f.Write(head[:]); err != nil {
 			return err
 		}
-		if _, err := f.Write(int16Bytes(c.BboxMin[:])); err != nil {
-			return err
+		// Cells: count cells × (start u32 + count u32 + bboxMn[Dims] i16 + bboxMx[Dims] i16)
+		const cellBytes = 8 + 2*Dims*2 // 64 bytes
+		buf := make([]byte, int(g.NumCells)*cellBytes)
+		off := 0
+		for c := uint32(0); c < g.NumCells; c++ {
+			cell := &g.Cells[c]
+			binary.LittleEndian.PutUint32(buf[off:], cell.Start)
+			binary.LittleEndian.PutUint32(buf[off+4:], cell.Count)
+			for d := 0; d < Dims; d++ {
+				binary.LittleEndian.PutUint16(buf[off+8+d*2:], uint16(cell.BboxMn[d]))
+				binary.LittleEndian.PutUint16(buf[off+8+Dims*2+d*2:], uint16(cell.BboxMx[d]))
+			}
+			off += cellBytes
 		}
-		if _, err := f.Write(int16Bytes(c.BboxMax[:])); err != nil {
+		if _, err := f.Write(buf); err != nil {
 			return err
 		}
 	}
@@ -71,7 +86,7 @@ func LoadIndex(path string) (*Dataset, error) {
 	}
 	defer f.Close()
 
-	var hdr [40]byte
+	var hdr [16 + 4*NumPartitions*2]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
 	}
@@ -84,47 +99,54 @@ func LoadIndex(path string) (*Dataset, error) {
 		return nil, fmt.Errorf("bad version: %d (want %d)", version, indexVersion)
 	}
 	count := int(binary.LittleEndian.Uint64(hdr[8:16]))
-	blocksLen := int(binary.LittleEndian.Uint64(hdr[16:24]))
-	labelsLen := int(binary.LittleEndian.Uint64(hdr[24:32]))
-	centroidsLen := int(binary.LittleEndian.Uint64(hdr[32:40]))
 
 	ds := &Dataset{
-		Count:       count,
-		Blocks:      make([]int16, blocksLen),
-		BlockLabels: make([]uint8, labelsLen),
-		IVF:         &IVFIndex{CentroidBlocks: make([]int16, centroidsLen)},
+		Count:   count,
+		Vectors: make([]int16, count*Stride),
+		Labels:  make([]uint8, count),
 	}
-	if _, err := io.ReadFull(f, int16Bytes(ds.Blocks)); err != nil {
-		return nil, fmt.Errorf("read blocks: %w", err)
-	}
-	if _, err := io.ReadFull(f, ds.BlockLabels); err != nil {
-		return nil, fmt.Errorf("read blocklabels: %w", err)
-	}
-	if _, err := io.ReadFull(f, int16Bytes(ds.IVF.CentroidBlocks)); err != nil {
-		return nil, fmt.Errorf("read centroidblocks: %w", err)
+	for p := 0; p < NumPartitions; p++ {
+		ds.PartitionStarts[p] = binary.LittleEndian.Uint32(hdr[16+p*4:])
+		ds.PartitionCounts[p] = binary.LittleEndian.Uint32(hdr[16+NumPartitions*4+p*4:])
 	}
 
-	var nc [4]byte
-	if _, err := io.ReadFull(f, nc[:]); err != nil {
-		return nil, fmt.Errorf("read numClusters: %w", err)
+	if _, err := io.ReadFull(f, int16Bytes(ds.Vectors)); err != nil {
+		return nil, fmt.Errorf("read vectors: %w", err)
 	}
-	numClusters := int(binary.LittleEndian.Uint32(nc[:]))
-	ds.IVF.Clusters = make([]Cluster, numClusters)
-	for ci := 0; ci < numClusters; ci++ {
-		c := &ds.IVF.Clusters[ci]
-		var meta [16]byte
-		if _, err := io.ReadFull(f, meta[:]); err != nil {
-			return nil, fmt.Errorf("read cluster meta %d: %w", ci, err)
+	if _, err := io.ReadFull(f, ds.Labels); err != nil {
+		return nil, fmt.Errorf("read labels: %w", err)
+	}
+
+	for p := 0; p < NumPartitions; p++ {
+		var head [4 + BoundsCount*2]byte
+		if _, err := io.ReadFull(f, head[:]); err != nil {
+			return nil, fmt.Errorf("read grid header p=%d: %w", p, err)
 		}
-		c.BlockStart = binary.LittleEndian.Uint32(meta[0:4])
-		c.LabelStart = binary.LittleEndian.Uint32(meta[4:8])
-		c.Count = binary.LittleEndian.Uint32(meta[8:12])
-		c.NumBlocks = binary.LittleEndian.Uint32(meta[12:16])
-		if _, err := io.ReadFull(f, int16Bytes(c.BboxMin[:])); err != nil {
-			return nil, fmt.Errorf("read bboxMin %d: %w", ci, err)
+		numCells := binary.LittleEndian.Uint32(head[0:4])
+		g := &ds.Grids[p]
+		g.NumCells = numCells
+		for b := 0; b < BoundsCount; b++ {
+			g.Bounds[b] = int16(binary.LittleEndian.Uint16(head[4+b*2:]))
 		}
-		if _, err := io.ReadFull(f, int16Bytes(c.BboxMax[:])); err != nil {
-			return nil, fmt.Errorf("read bboxMax %d: %w", ci, err)
+		if numCells == 0 {
+			continue
+		}
+		const cellBytes = 8 + 2*Dims*2
+		buf := make([]byte, int(numCells)*cellBytes)
+		if _, err := io.ReadFull(f, buf); err != nil {
+			return nil, fmt.Errorf("read cells p=%d: %w", p, err)
+		}
+		g.Cells = make([]Cell, numCells)
+		off := 0
+		for c := uint32(0); c < numCells; c++ {
+			cell := &g.Cells[c]
+			cell.Start = binary.LittleEndian.Uint32(buf[off:])
+			cell.Count = binary.LittleEndian.Uint32(buf[off+4:])
+			for d := 0; d < Dims; d++ {
+				cell.BboxMn[d] = int16(binary.LittleEndian.Uint16(buf[off+8+d*2:]))
+				cell.BboxMx[d] = int16(binary.LittleEndian.Uint16(buf[off+8+Dims*2+d*2:]))
+			}
+			off += cellBytes
 		}
 	}
 	return ds, nil

@@ -2,31 +2,21 @@ package search
 
 import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 
-const (
-	k      = 5
-	dims   = dataset.Dims
-	stride = dataset.Stride
-)
-
-// FraudCount is the exact brute-force scanner over the flat ds.Vectors slab.
-// Only callable when ds.Vectors is non-nil (i.e., the dataset was just built
-// from JSON, not loaded from the persisted index). Used by tests.
-func FraudCount(query *[stride]int16, ds *dataset.Dataset) int {
-	if ds.Vectors == nil {
-		panic("FraudCount: ds.Vectors is nil — only available after LoadFromGzipJSON, not LoadIndex")
-	}
+// FraudCountBrute scans the entire dataset and returns the exact KNN-5
+// fraud count. O(N · D). Used only by tests to validate the grid search.
+func FraudCountBrute(query *[stride]int16, ds *dataset.Dataset) int {
 	vectors := ds.Vectors
 	labels := ds.Labels
 	n := ds.Count
 
-	tk := newTopK()
-	d0, d1, d2, d3, d4 := tk.d0, tk.d1, tk.d2, tk.d3, tk.d4
-	l0, l1, l2, l3, l4 := tk.lab0, tk.lab1, tk.lab2, tk.lab3, tk.lab4
+	const inf int64 = 1 << 62
+	d0, d1, d2, d3, d4 := inf, inf, inf, inf, inf
+	var l0, l1, l2, l3, l4 uint8
 
 	for i := 0; i < n; i++ {
 		base := i * stride
 		var sum int64
-		for d := 0; d < stride; d++ {
+		for d := 0; d < dataset.Dims; d++ {
 			t := int64(query[d]) - int64(vectors[base+d])
 			sum += t * t
 			if sum >= d4 {
@@ -37,28 +27,8 @@ func FraudCount(query *[stride]int16, ds *dataset.Dataset) int {
 			continue
 		}
 		lab := labels[i]
-		switch {
-		case sum < d0:
-			d4, l4 = d3, l3
-			d3, l3 = d2, l2
-			d2, l2 = d1, l1
-			d1, l1 = d0, l0
-			d0, l0 = sum, lab
-		case sum < d1:
-			d4, l4 = d3, l3
-			d3, l3 = d2, l2
-			d2, l2 = d1, l1
-			d1, l1 = sum, lab
-		case sum < d2:
-			d4, l4 = d3, l3
-			d3, l3 = d2, l2
-			d2, l2 = sum, lab
-		case sum < d3:
-			d4, l4 = d3, l3
-			d3, l3 = sum, lab
-		default:
-			d4, l4 = sum, lab
-		}
+		d0, d1, d2, d3, d4, l0, l1, l2, l3, l4 = topKInsert(
+			sum, lab, d0, d1, d2, d3, d4, l0, l1, l2, l3, l4)
 	}
 
 	frauds := 0
