@@ -1,12 +1,3 @@
-// Package search implements KNN-5 over the in-memory reference dataset.
-//
-// Phase 1c (this file): brute-force O(N*D) over int16-quantized vectors with
-// early-exit per-vector squared distance. Correct but slow at 3M; the grid +
-// LB-pruning version replaces this in Phase 2.
-//
-// Distance metric: squared Euclidean in int16 space. Max per-dim diff is
-// ~32000 (within a partition); summed across 14 dims fits comfortably in
-// int64. We accumulate in int64.
 package search
 
 import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
@@ -16,8 +7,8 @@ const (
 	dims = dataset.Dims
 )
 
-// FraudCount returns the number of fraud labels among the 5 nearest neighbors
-// of query in ds, using brute-force scan.
+// FraudCount is the reference brute-force scanner. Kept for verification of
+// the grid path; not used in production.
 func FraudCount(query *[dims]int16, ds *dataset.Dataset) int {
 	vectors := ds.Vectors
 	labels := ds.Labels
@@ -48,8 +39,6 @@ func FraudCount(query *[dims]int16, ds *dataset.Dataset) int {
 	for i := 0; i < n; i++ {
 		base := i * dims
 
-		// Early-exit kernel: accumulate squared distance dim by dim, bail as
-		// soon as we exceed the current 5th-best distance.
 		t := q0 - int32(vectors[base])
 		dist := int64(t) * int64(t)
 		if dist >= d4 {
@@ -121,7 +110,6 @@ func FraudCount(query *[dims]int16, ds *dataset.Dataset) int {
 			continue
 		}
 
-		// Cascading 5-slot insert.
 		switch {
 		case dist < d0:
 			d4, i4 = d3, i3

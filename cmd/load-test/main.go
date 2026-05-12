@@ -33,7 +33,6 @@ func main() {
 	fmt.Printf("heap inuse: %.1f MB, alloc total: %.1f MB\n",
 		float64(m.HeapInuse)/(1<<20), float64(m.TotalAlloc)/(1<<20))
 
-	// Sanity check: every vector in partition k's range should compute key k.
 	fmt.Println("\nverifying partition layout...")
 	mismatches := 0
 	for k := 0; k < dataset.NumPartitions; k++ {
@@ -66,7 +65,6 @@ func main() {
 			continue
 		}
 		start := ds.PartitionStarts[k]
-		// fraud count within this partition
 		f := 0
 		for i := start; i < start+count; i++ {
 			if ds.Labels[i] == 1 {
