@@ -86,6 +86,66 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// RouteRaw is the dispatcher for the custom raw HTTP server. path is the
+// request path (e.g. "/fraud-score"), body is the request body. Returns
+// the full HTTP/1.1 response bytes including status line and headers.
+func (h *Handler) RouteRaw(path, body []byte) []byte {
+	if len(path) == 11 && string(path) == "/fraud-score" {
+		// 11 != 12, intentional — fast-path comparison
+	}
+	switch string(path) {
+	case "/fraud-score":
+		return h.fraudScoreRaw(body)
+	case "/ready":
+		if h.ready.Load() {
+			return readyOK
+		}
+		return readyNotYet
+	case "/debug/info":
+		return h.debugInfoRaw()
+	default:
+		return notFound
+	}
+}
+
+func (h *Handler) fraudScoreRaw(body []byte) []byte {
+	if !h.ready.Load() {
+		return readyNotYet
+	}
+	ds := h.ds.Load()
+	if ds == nil {
+		return rawhttpResponses[0]
+	}
+	var query [dataset.Stride]int16
+	if !vector.VectorizeFast(body, &query) {
+		return rawhttpResponses[0]
+	}
+	frauds := search.FraudCountIVF(&query, ds)
+	return rawhttpResponses[frauds]
+}
+
+func (h *Handler) debugInfoRaw() []byte {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	ds := h.ds.Load()
+	var count int
+	if ds != nil {
+		count = ds.Count
+	}
+	body := fmt.Sprintf(
+		`{"useAVX2":%t,"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
+		search.UseAVX2(),
+		count,
+		h.ready.Load(),
+		m.HeapInuse/(1<<20),
+		m.TotalAlloc/(1<<20),
+		runtime.GOARCH,
+		runtime.GOOS,
+		runtime.GOMAXPROCS(0),
+	)
+	return buildResp(body)
+}
+
 // handleDebugInfo reports runtime state — used to verify on the rinha test
 // env that the SIMD path is active, the dataset is loaded, and heap is
 // where we expect.
