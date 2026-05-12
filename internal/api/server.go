@@ -4,14 +4,52 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/search"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/vector"
 )
+
+// Load shedder configuration (Josiney-style):
+//
+//   - SHED_SLOTS = N in-flight requests per API replica. If N requests are
+//     already running the search, new arrivals wait on the semaphore.
+//   - SHED_TIMEOUT_MS = maximum time to wait for a slot. If exceeded,
+//     return the default "approved" response immediately, before parsing
+//     or searching. This caps tail latency at SHED_TIMEOUT_MS + tiny HTTP
+//     overhead, at the cost of misclassifying shed-fraud as approved.
+//
+// The shed response is fraudResponses[0] = {"approved":true,"fraud_score":0}.
+// Picking "approve" over "deny" matches the scoring asymmetry: deny-of-legit
+// (FP) costs 1 in E, approve-of-fraud (FN) costs 3 in E, both vs HTTP-5xx's
+// 5 in E. Shedding to approve trades expected FN for expected Err on
+// every shed; FN < Err, so it's the right default.
+var (
+	shedSlots     = envInt("SHED_SLOTS", 4)
+	shedTimeoutMS = envInt("SHED_TIMEOUT_MS", 3)
+
+	shedSem        = make(chan struct{}, shedSlots)
+	shedTimeoutDur = time.Duration(shedTimeoutMS) * time.Millisecond
+	shedCount      atomic.Uint64 // total requests shed (for /debug/info)
+)
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
 
 // Pooled 2 KB read buffer. Spec bodies are 500–700 bytes; io.ReadAll would
 // grow-and-allocate per request.
@@ -116,6 +154,18 @@ func (h *Handler) fraudScoreRaw(body []byte) []byte {
 	if ds == nil {
 		return rawhttpResponses[0]
 	}
+
+	// === Load shedder. Try to acquire a slot within the shed timeout. If
+	// we can't, return the default "approved" response. Under low load
+	// the select acquires immediately and the timeout never fires.
+	select {
+	case shedSem <- struct{}{}:
+		defer func() { <-shedSem }()
+	case <-time.After(shedTimeoutDur):
+		shedCount.Add(1)
+		return rawhttpResponses[0]
+	}
+
 	var query [dataset.Stride]int16
 	if !vector.VectorizeFast(body, &query) {
 		return rawhttpResponses[0]
@@ -133,7 +183,7 @@ func (h *Handler) debugInfoRaw() []byte {
 		count = ds.Count
 	}
 	body := fmt.Sprintf(
-		`{"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
+		`{"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d,"shed_slots":%d,"shed_timeout_ms":%d,"shed_count":%d}`,
 		count,
 		h.ready.Load(),
 		m.HeapInuse/(1<<20),
@@ -141,6 +191,9 @@ func (h *Handler) debugInfoRaw() []byte {
 		runtime.GOARCH,
 		runtime.GOOS,
 		runtime.GOMAXPROCS(0),
+		shedSlots,
+		shedTimeoutMS,
+		shedCount.Load(),
 	)
 	return buildResp(body)
 }

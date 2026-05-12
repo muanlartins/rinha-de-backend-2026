@@ -92,6 +92,21 @@ The HTTP handler is engineered so a steady-state request allocates nothing on th
 3. **Search** — top-K is 5 paired `int64`/`uint8` locals; scratch buffers for cell LBs and sorted indices are stack-allocated `[1024]` arrays inside `FraudCount`. No allocations in the hot path.
 4. **Response** — pre-built `rawhttpResponses[0..5]` byte slices.
 
+Exception (phase 13+): the load shedder uses `time.After()` for the timeout select, which allocates a `*time.Timer` per call. ~30 ns + GC pressure. Acceptable for now; switch to a pooled `time.Timer` if pprof flags it. See lecture 07.
+
+## Load shedder
+
+The hot path acquires a slot in a bounded semaphore before doing real work; if it can't get a slot within a timeout, it returns the default approved response (lecture 07). Two env vars in `deploy/docker-compose.yml`:
+
+```yaml
+api-1:
+  environment:
+    - SHED_SLOTS=4         # in-flight requests per API replica
+    - SHED_TIMEOUT_MS=3    # max wait for a slot before shedding
+```
+
+`shed_count` is exposed via `/debug/info`; check it after a Mac Mini run to see how many requests were shed. If it's 0, the shedder didn't fire (might be tuned too loose). If it's > 2 % of total, it's firing too hard (detection cost outweighs latency win).
+
 ## Why `GOMAXPROCS(1)`, `GOGC=200`, `GOMEMLIMIT=140MB`
 
 Each API container has a cgroup limit of 0.45 CPU and 167 MB. The Go runtime reads `NumCPU` and sees the host's full CPU count, not the cgroup share — without intervention it spins up 8+ schedulers and oversubscribes. `GOMAXPROCS(1)` aligns the runtime with the actual share.
