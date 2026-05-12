@@ -1,239 +1,192 @@
 package dataset
 
-import (
-	"math/rand/v2"
-	"slices"
-)
+import "sort"
 
 const (
-	// IVFClustersPerPartition: number of k-means clusters built within each
-	// of the 32 partitions. With 3M vectors across 32 partitions, each
-	// partition has ~94k vectors → ~735 per cluster at K=128.
-	IVFClustersPerPartition = 128
-	// IVFKmeansIters: Lloyd iterations for k-means. Few enough to keep
-	// image build time under a couple minutes; many enough for usable
-	// clusters (random init + 5 passes converges to ~95% of full converge).
-	IVFKmeansIters = 5
+	// IVFClusters: K, must be a power of two for the recursive balanced
+	// split. 8192 → ~366 vectors per cluster over 3M. Same value top-Go
+	// uses; gives nprobe=8 enough coverage for ~exact KNN-5.
+	IVFClusters = 8192
 
-	// BlockVectors: vectors per block in the dim-major SIMD layout.
-	BlockVectors = 8
-	// BlockInt16: int16 elements per block = 16 dims × 8 vectors.
-	BlockInt16 = Stride * BlockVectors
+	BlockVectors          = 8
+	BlockInt16            = Stride * BlockVectors
+	IVFCentroidBlockInt16 = Stride * BlockVectors
 )
 
 type Cluster struct {
-	Centroid [Stride]int16 // dim 14, 15 always 0
-	// BlockStart is the index (in int16 units) into ds.Blocks where this
-	// cluster's data begins. Each block holds 8 vectors in dim-major layout:
-	// 16 dims × 8 int16 = 128 int16 = 256 bytes per block.
 	BlockStart uint32
-	// LabelStart is the index (in uint8 units) into ds.Labels where this
-	// cluster's labels begin. NumBlocks * 8 labels are reserved per cluster;
-	// the trailing (NumBlocks*8 - Count) are padding and unused.
 	LabelStart uint32
-	Count      uint32 // number of real vectors in the cluster
-	NumBlocks  uint32 // ceil(Count / 8) — how many 8-wide blocks
+	Count      uint32
+	NumBlocks  uint32
 	BboxMin    [Stride]int16
 	BboxMax    [Stride]int16
-	// flatStart is transient state used between buildPartitionIVF and
-	// transposeToBlocks. Not serialized.
-	flatStart uint32
 }
 
-type IVFPartition struct {
-	Clusters []Cluster
+type IVFIndex struct {
+	Clusters       []Cluster
+	CentroidBlocks []int16 // ceil(K/8) blocks × Stride × 8 int16, dim-major
 }
 
-// BuildIVF runs k-means clusters within each partition and transposes the
-// vector data into block-major layout (8 vectors × 16 dims per block). The
-// flat Vectors slab is kept after this call — callers (the build-index tool
-// in particular) can set ds.Vectors = nil to reclaim it before serializing.
-// Tests rely on Vectors staying around for brute-force comparison.
+// BuildIVF: balanced KD-tree-style binary split on the max-variance dim,
+// recursive until we have K clusters. Each cluster has equal size (±1).
+// Much faster and more uniform than Lloyd k-means, and the cluster sizes
+// being balanced is what makes nprobe-based search reliable.
 func (ds *Dataset) BuildIVF() {
-	ds.IVF = make([]*IVFPartition, NumPartitions)
-	for k := uint8(0); k < NumPartitions; k++ {
-		if ds.PartitionCounts[k] == 0 {
-			continue
-		}
-		ds.IVF[k] = ds.buildPartitionIVF(k)
+	K := IVFClusters
+	if K > ds.Count {
+		K = highestPowerOfTwoLE(ds.Count)
 	}
-	ds.transposeToBlocks()
+
+	ids := make([]uint32, ds.Count)
+	for i := range ids {
+		ids[i] = uint32(i)
+	}
+	ranges := make([][2]uint32, K)
+	balancedSplit(ds.Vectors, ids, ranges, 0, ds.Count, 0, K)
+
+	clusters := make([]Cluster, K)
+	centroidsFlat := make([]int16, K*Stride)
+	for c := 0; c < K; c++ {
+		r := ranges[c]
+		clusters[c].Count = r[1] - r[0]
+		clusters[c].NumBlocks = (clusters[c].Count + BlockVectors - 1) / BlockVectors
+		computeClusterStats(ds.Vectors, ids, r,
+			centroidsFlat[c*Stride:(c+1)*Stride],
+			clusters[c].BboxMin[:],
+			clusters[c].BboxMax[:])
+	}
+
+	ds.IVF = &IVFIndex{Clusters: clusters}
+	ds.transposeVectorsToBlocksByIDs(ids, ranges)
+	ds.packCentroids(centroidsFlat)
 }
 
-// transposeToBlocks copies each cluster's contiguous vectors from ds.Vectors
-// (flat) into ds.Blocks (8-wide dim-major blocks). Labels are remapped in
-// place so cluster c's labels live at ds.Labels[c.LabelStart : +NumBlocks*8].
-// Padding slots get value 0 (vector) and 0 (label); search ignores them via
-// the per-cluster Count check.
-func (ds *Dataset) transposeToBlocks() {
-	// First pass: count total blocks needed.
+func balancedSplit(vectors []int16, ids []uint32, ranges [][2]uint32, start, end, clusterBase, clusterCount int) {
+	if clusterCount == 1 {
+		ranges[clusterBase] = [2]uint32{uint32(start), uint32(end)}
+		return
+	}
+	dim := maxVarianceDim(vectors, ids, start, end)
+	window := ids[start:end]
+	sort.Slice(window, func(i, j int) bool {
+		l := vectors[int(window[i])*Stride+dim]
+		r := vectors[int(window[j])*Stride+dim]
+		if l == r {
+			return window[i] < window[j]
+		}
+		return l < r
+	})
+	mid := start + (end-start)/2
+	half := clusterCount / 2
+	balancedSplit(vectors, ids, ranges, start, mid, clusterBase, half)
+	balancedSplit(vectors, ids, ranges, mid, end, clusterBase+half, half)
+}
+
+func maxVarianceDim(vectors []int16, ids []uint32, start, end int) int {
+	var sums, sumSq [Stride]int64
+	for i := start; i < end; i++ {
+		base := int(ids[i]) * Stride
+		for d := 0; d < Stride; d++ {
+			v := int64(vectors[base+d])
+			sums[d] += v
+			sumSq[d] += v * v
+		}
+	}
+	count := float64(end - start)
+	best, bestVar := 0, -1.0
+	for d := 0; d < Stride; d++ {
+		mean := float64(sums[d]) / count
+		variance := float64(sumSq[d])/count - mean*mean
+		if variance > bestVar {
+			bestVar = variance
+			best = d
+		}
+	}
+	return best
+}
+
+func computeClusterStats(vectors []int16, ids []uint32, r [2]uint32, centroid, bboxMin, bboxMax []int16) {
+	for d := 0; d < Stride; d++ {
+		bboxMin[d] = 32767
+		bboxMax[d] = -32768
+	}
+	var sums [Stride]int64
+	for i := r[0]; i < r[1]; i++ {
+		base := int(ids[i]) * Stride
+		for d := 0; d < Stride; d++ {
+			v := vectors[base+d]
+			sums[d] += int64(v)
+			if v < bboxMin[d] {
+				bboxMin[d] = v
+			}
+			if v > bboxMax[d] {
+				bboxMax[d] = v
+			}
+		}
+	}
+	count := int64(r[1] - r[0])
+	for d := 0; d < Stride; d++ {
+		if count > 0 {
+			centroid[d] = int16((sums[d] + count/2) / count)
+		}
+	}
+}
+
+func (ds *Dataset) transposeVectorsToBlocksByIDs(ids []uint32, ranges [][2]uint32) {
 	var totalBlocks uint64
-	for _, pg := range ds.IVF {
-		if pg == nil {
-			continue
-		}
-		for ci := range pg.Clusters {
-			totalBlocks += uint64(pg.Clusters[ci].NumBlocks)
-		}
+	for ci := range ds.IVF.Clusters {
+		totalBlocks += uint64(ds.IVF.Clusters[ci].NumBlocks)
 	}
 	ds.Blocks = make([]int16, totalBlocks*BlockInt16)
 	ds.BlockLabels = make([]uint8, totalBlocks*BlockVectors)
 
 	var dstBlock uint64
-	for _, pg := range ds.IVF {
-		if pg == nil {
-			continue
-		}
-		for ci := range pg.Clusters {
-			c := &pg.Clusters[ci]
-			srcStart := c.flatStart
-			c.BlockStart = uint32(dstBlock * BlockInt16)
-			c.LabelStart = uint32(dstBlock * BlockVectors)
-			for b := uint32(0); b < c.NumBlocks; b++ {
-				blockOff := (dstBlock + uint64(b)) * BlockInt16
-				for v := uint32(0); v < BlockVectors; v++ {
-					pos := b*BlockVectors + v
-					if pos >= c.Count {
-						break
-					}
-					srcIdx := srcStart + pos
-					vBase := uint64(srcIdx) * Stride
-					for d := uint32(0); d < Stride; d++ {
-						ds.Blocks[blockOff+uint64(d)*BlockVectors+uint64(v)] = ds.Vectors[vBase+uint64(d)]
-					}
-					ds.BlockLabels[c.LabelStart+pos] = ds.Labels[srcIdx]
+	for ci := range ds.IVF.Clusters {
+		c := &ds.IVF.Clusters[ci]
+		r := ranges[ci]
+		c.BlockStart = uint32(dstBlock * BlockInt16)
+		c.LabelStart = uint32(dstBlock * BlockVectors)
+		for b := uint32(0); b < c.NumBlocks; b++ {
+			blockOff := (dstBlock + uint64(b)) * BlockInt16
+			for v := uint32(0); v < BlockVectors; v++ {
+				pos := b*BlockVectors + v
+				if pos >= c.Count {
+					break
 				}
+				origID := ids[r[0]+pos]
+				vBase := uint64(origID) * Stride
+				for d := uint32(0); d < Stride; d++ {
+					ds.Blocks[blockOff+uint64(d)*BlockVectors+uint64(v)] = ds.Vectors[vBase+uint64(d)]
+				}
+				ds.BlockLabels[c.LabelStart+pos] = ds.Labels[origID]
 			}
-			dstBlock += uint64(c.NumBlocks)
+		}
+		dstBlock += uint64(c.NumBlocks)
+	}
+}
+
+func (ds *Dataset) packCentroids(centroidsFlat []int16) {
+	K := len(centroidsFlat) / Stride
+	numBlocks := (K + BlockVectors - 1) / BlockVectors
+	ds.IVF.CentroidBlocks = make([]int16, numBlocks*IVFCentroidBlockInt16)
+	for b := 0; b < numBlocks; b++ {
+		blockOff := b * IVFCentroidBlockInt16
+		for v := 0; v < BlockVectors; v++ {
+			ci := b*BlockVectors + v
+			if ci >= K {
+				break
+			}
+			for d := 0; d < Stride; d++ {
+				ds.IVF.CentroidBlocks[blockOff+d*BlockVectors+v] = centroidsFlat[ci*Stride+d]
+			}
 		}
 	}
 }
 
-func (ds *Dataset) buildPartitionIVF(key uint8) *IVFPartition {
-	pStart := ds.PartitionStarts[key]
-	pCount := ds.PartitionCounts[key]
-
-	K := IVFClustersPerPartition
-	if int(pCount) < K {
-		K = int(pCount)
+func highestPowerOfTwoLE(v int) int {
+	p := 1
+	for p*2 <= v {
+		p *= 2
 	}
-
-	rng := rand.New(rand.NewPCG(uint64(key)*0x9e3779b97f4a7c15, 0xa5a5a5a5a5a5a5a5))
-
-	centroids := make([][Stride]int16, K)
-	picked := make(map[uint32]struct{}, K)
-	for c := 0; c < K; c++ {
-		for {
-			r := uint32(rng.IntN(int(pCount)))
-			if _, dup := picked[r]; dup {
-				continue
-			}
-			picked[r] = struct{}{}
-			base := (pStart + r) * Stride
-			copy(centroids[c][:], ds.Vectors[base:base+Stride])
-			break
-		}
-	}
-
-	assign := make([]uint16, pCount)
-	for iter := 0; iter < IVFKmeansIters; iter++ {
-		for i := uint32(0); i < pCount; i++ {
-			base := (pStart + i) * Stride
-			var bestD int64 = (1 << 62)
-			var bestC uint16
-			for c := 0; c < K; c++ {
-				d := sqdistI16(ds.Vectors[base:base+Stride], centroids[c][:])
-				if d < bestD {
-					bestD = d
-					bestC = uint16(c)
-				}
-			}
-			assign[i] = bestC
-		}
-
-		// Recompute centroids as mean of assigned vectors.
-		var sums [][Stride]int64
-		sums = make([][Stride]int64, K)
-		counts := make([]uint32, K)
-		for i := uint32(0); i < pCount; i++ {
-			c := assign[i]
-			counts[c]++
-			base := (pStart + i) * Stride
-			for d := 0; d < Stride; d++ {
-				sums[c][d] += int64(ds.Vectors[base+uint32(d)])
-			}
-		}
-		for c := 0; c < K; c++ {
-			if counts[c] == 0 {
-				// Reseed an empty cluster from a random vector.
-				r := uint32(rng.IntN(int(pCount)))
-				base := (pStart + r) * Stride
-				copy(centroids[c][:], ds.Vectors[base:base+Stride])
-				continue
-			}
-			for d := 0; d < Stride; d++ {
-				centroids[c][d] = int16(sums[c][d] / int64(counts[c]))
-			}
-		}
-	}
-
-	// Compute cluster sizes (final assignment), then reorder vectors so
-	// each cluster's members sit contiguously inside the partition.
-	counts := make([]uint32, K)
-	for _, c := range assign {
-		counts[c]++
-	}
-	startsLocal := make([]uint32, K)
-	for c := 1; c < K; c++ {
-		startsLocal[c] = startsLocal[c-1] + counts[c-1]
-	}
-	// Inverse / source map for the cycle walker (same convention as the grid).
-	src := make([]uint32, pCount)
-	cursors := slices.Clone(startsLocal)
-	for i := uint32(0); i < pCount; i++ {
-		c := assign[i]
-		src[cursors[c]] = i
-		cursors[c]++
-	}
-	permuteInPartition(ds, pStart, pCount, src, nil)
-
-	// Build per-cluster AABBs over all dims.
-	clusters := make([]Cluster, K)
-	for c := 0; c < K; c++ {
-		clusters[c].Centroid = centroids[c]
-		clusters[c].flatStart = pStart + startsLocal[c]
-		clusters[c].Count = counts[c]
-		clusters[c].NumBlocks = (counts[c] + BlockVectors - 1) / BlockVectors
-		for d := 0; d < Stride; d++ {
-			clusters[c].BboxMin[d] = 32767
-			clusters[c].BboxMax[d] = -32768
-		}
-		start := clusters[c].flatStart
-		cnt := clusters[c].Count
-		for k := uint32(0); k < cnt; k++ {
-			vBase := (start + k) * Stride
-			for d := 0; d < Stride; d++ {
-				v := ds.Vectors[vBase+uint32(d)]
-				if v < clusters[c].BboxMin[d] {
-					clusters[c].BboxMin[d] = v
-				}
-				if v > clusters[c].BboxMax[d] {
-					clusters[c].BboxMax[d] = v
-				}
-			}
-		}
-	}
-
-	return &IVFPartition{Clusters: clusters}
-}
-
-// sqdistI16 — scalar squared Euclidean between two Stride-int16 vectors.
-// Used at build time only; runtime uses the SIMD path.
-func sqdistI16(a, b []int16) int64 {
-	var sum int64
-	for d := 0; d < Stride; d++ {
-		t := int64(a[d]) - int64(b[d])
-		sum += t * t
-	}
-	return sum
+	return p
 }

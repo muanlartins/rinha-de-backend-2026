@@ -25,12 +25,8 @@ func main() {
 	log.Printf("load: %d vectors in %s", ds.Count, time.Since(t0))
 
 	t1 := time.Now()
-	ds.Partition()
-	log.Printf("partition: %s", time.Since(t1))
-
-	t2 := time.Now()
 	ds.BuildIVF()
-	log.Printf("build-ivf: %s", time.Since(t2))
+	log.Printf("build-ivf: %s", time.Since(t1))
 
 	t3 := time.Now()
 	if err := ds.SaveIndex(out); err != nil {
