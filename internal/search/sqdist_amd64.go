@@ -13,3 +13,7 @@ func sqdistAVX2(query, ref *int16) int64
 // env (Mac Mini Late 2014 = Haswell) this is always true; on Rosetta 2 it
 // depends on macOS version.
 var useAVX2 = cpu.X86.HasAVX2
+
+// UseAVX2 reports whether the SIMD kernel is selected at runtime. Exposed
+// for /debug/info.
+func UseAVX2() bool { return useAVX2 }
