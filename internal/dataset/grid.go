@@ -97,7 +97,11 @@ func (ds *Dataset) buildPartitionGrid(p uint8) {
 
 	swapPermuteRows(ds.Vectors, ds.Labels, target, start, count)
 
-	// === Step 4: record cell metadata for non-empty cells.
+	// === Step 4: for each non-empty cell, sort its vectors by distance to
+	// the cell's centroid, then compute the AABB. The sort makes the
+	// runtime early-exit kernel converge faster: the first vectors scanned
+	// in a cell are the cluster's most-central, so the top-5 tightens
+	// quickly and subsequent candidates bail out at dim 1-2.
 	cells := make([]Cell, 0, 256)
 	for c := 0; c < BinsTotal; c++ {
 		cnt := bucketCounts[c]
@@ -105,6 +109,10 @@ func (ds *Dataset) buildPartitionGrid(p uint8) {
 			continue
 		}
 		offsetInPartition := bucketStarts[c]
+		cellStartAbs := start + offsetInPartition
+
+		sortCellByDistToCentroid(ds.Vectors, ds.Labels, cellStartAbs, cnt)
+
 		var cell Cell
 		cell.Start = offsetInPartition
 		cell.Count = cnt
@@ -113,7 +121,7 @@ func (ds *Dataset) buildPartitionGrid(p uint8) {
 			cell.BboxMx[d] = -32768
 		}
 		for i := uint32(0); i < cnt; i++ {
-			base := (start + offsetInPartition + i) * Stride
+			base := (cellStartAbs + i) * Stride
 			for d := 0; d < Dims; d++ {
 				v := ds.Vectors[base+uint32(d)]
 				if v < cell.BboxMn[d] {
@@ -180,6 +188,49 @@ func bin(v int16, bounds []int16) int {
 		}
 	}
 	return b
+}
+
+// sortCellByDistToCentroid reorders one cell's vectors / labels so they
+// are ascending by squared distance from the cell's centroid. The
+// centroid is the integer mean of the cell's vectors per dim. Operates
+// on the slab in place.
+func sortCellByDistToCentroid(vectors []int16, labels []uint8, cellStart uint32, count uint32) {
+	if count <= 1 {
+		return
+	}
+	var sum [Dims]int32
+	for i := uint32(0); i < count; i++ {
+		base := (cellStart + i) * Stride
+		for d := 0; d < Dims; d++ {
+			sum[d] += int32(vectors[base+uint32(d)])
+		}
+	}
+	var centroid [Dims]int16
+	for d := 0; d < Dims; d++ {
+		centroid[d] = int16(sum[d] / int32(count))
+	}
+	type pair struct {
+		dist int64
+		idx  uint32
+	}
+	pairs := make([]pair, count)
+	for i := uint32(0); i < count; i++ {
+		base := (cellStart + i) * Stride
+		var dist int64
+		for d := 0; d < Dims; d++ {
+			t := int64(vectors[base+uint32(d)]) - int64(centroid[d])
+			dist += t * t
+		}
+		pairs[i] = pair{dist, i}
+	}
+	sort.Slice(pairs, func(a, b int) bool { return pairs[a].dist < pairs[b].dist })
+
+	// target[oldRel] = absolute index where the row should land.
+	target := make([]uint32, count)
+	for k := uint32(0); k < count; k++ {
+		target[pairs[k].idx] = cellStart + k
+	}
+	swapPermuteRows(vectors, labels, target, cellStart, count)
 }
 
 // swapPermuteRows permutes a slab of consecutive rows in `vectors` /
