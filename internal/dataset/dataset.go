@@ -1,3 +1,11 @@
+// Package dataset is the build-time loader for references.json.gz.
+//
+// Runtime search uses internal/ivf for the IVF index. Dataset is only used
+// at index-build time by cmd/build-index (and by tests/benches that need
+// raw vectors).
+//
+// The on-disk index format produced by the builder is owned by internal/ivf,
+// not by this package — see lecture 09.
 package dataset
 
 import (
@@ -11,72 +19,23 @@ import (
 const (
 	// Dims is the vector arity used everywhere on the hot path.
 	Dims = 14
-	// Stride is the per-vector stride in the flat int16 slab. We do NOT pad —
-	// the early-exit kernel touches dims in order and bails before the end on
-	// most candidates, so the 13 % bandwidth saving from dropping the int16
-	// padding outweighs any SIMD-friendliness we lose (and the SIMD kernel is
-	// gone anyway — see docs/lectures/05-grid-revival.md).
+	// Stride is the per-vector stride in the flat int16 slab.
 	Stride       = 14
 	QuantScale   = 32000
 	SentinelInt  = -32000
 	SentinelReal = -1.0
-
-	// NumPartitions is fixed at 32 = 2^5 (dims 9, 10, 11, sentinel-5,
-	// sentinel-6). One key per query → one partition scanned per query.
-	NumPartitions = 32
 )
 
-// Grid bin configuration. Same shape QRust converged on (`[1,128]`-ish from
-// their search-s3b sweep transferred to int16 with our partition split).
-// Dims 0 / 12 / 7 chosen because none of them are constant in any partition:
-//   - dim 0 (amount): high variance, never constant.
-//   - dim 12 (mcc_risk): seven distinct values per the lookup table → fine.
-//   - dim 7 (km_from_home): continuous, never the sentinel dim.
-const (
-	GridDim0    = 0
-	GridDim1    = 12
-	GridDim2    = 7
-	BinsD0      = 16
-	BinsD1      = 8
-	BinsD2      = 8
-	BinsTotal   = BinsD0 * BinsD1 * BinsD2 // 1024
-	BoundsCount = (BinsD0 - 1) + (BinsD1 - 1) + (BinsD2 - 1)
-)
-
-// Cell is the unit the inner search loop iterates over.
-type Cell struct {
-	Start  uint32 // offset in vectors (relative to partition start)
-	Count  uint32
-	BboxMn [Dims]int16
-	BboxMx [Dims]int16
-}
-
-// PartitionGrid holds the grid metadata for one of the 32 partitions.
-// Only the non-empty cells are stored; CellKeyToIdx maps from the 10-bit
-// cellKey (0..1023) to the index in Cells, or -1 for empty cells.
-type PartitionGrid struct {
-	Cells     []Cell
-	Bounds    [BoundsCount]int16
-	NumCells  uint32
-}
-
-// Dataset is the runtime view of the prepared index. After LoadIndex:
-//   - Vectors and Labels are populated and live for process lifetime.
-//   - Per-partition start / count and grid metadata index into Vectors.
+// Dataset is the in-memory representation of references.json.gz after
+// loading and quantization. The IVF builder consumes Vectors + Labels.
 type Dataset struct {
 	Vectors []int16 // length = Count * Stride
 	Labels  []uint8 // length = Count
-
-	Count            int
-	PartitionStarts  [NumPartitions]uint32
-	PartitionCounts  [NumPartitions]uint32
-	Grids            [NumPartitions]PartitionGrid
+	Count   int
 }
 
-// LoadFromGzipJSON is the build-time entry point. It streams
-// `references.json.gz`, quantizes floats → int16, and produces a Dataset
-// with Vectors and Labels filled in source order (no partition / grid yet —
-// call BuildGrid afterwards).
+// LoadFromGzipJSON streams `references.json.gz`, quantizes floats → int16,
+// and returns a Dataset with Vectors and Labels filled in source order.
 func LoadFromGzipJSON(path string) (*Dataset, error) {
 	count, err := scan(path, nil)
 	if err != nil {
@@ -124,29 +83,6 @@ func quantize(v float32) int16 {
 		return QuantScale
 	}
 	return int16(v*QuantScale + 0.5)
-}
-
-// PartitionKey computes the 5-bit partition key from a quantized vector.
-// Identical formula for both build-time references and runtime queries —
-// dataset and search agree on layout iff they agree on this function.
-func PartitionKey(v []int16) uint8 {
-	var k uint8
-	if v[9] != 0 {
-		k |= 1
-	}
-	if v[10] != 0 {
-		k |= 2
-	}
-	if v[11] != 0 {
-		k |= 4
-	}
-	if v[5] == SentinelInt {
-		k |= 8
-	}
-	if v[6] == SentinelInt {
-		k |= 16
-	}
-	return k
 }
 
 func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
@@ -254,57 +190,42 @@ func readFloat(br *bufio.Reader) (val float32, last byte, err error) {
 			case 2:
 				v += float64(b-'0') * frac
 				frac *= 0.1
-			case 3, 4:
+			case 3:
+				expSign = 1
+				exp = int(b - '0')
 				state = 4
+			case 4:
 				exp = exp*10 + int(b-'0')
 			}
-		case b == '.' && state == 1:
+		case b == '.':
 			state = 2
-		case (b == 'e' || b == 'E') && (state == 1 || state == 2):
+		case b == 'e' || b == 'E':
 			state = 3
-		case (b == '+' || b == '-') && state == 3:
-			if b == '-' {
-				expSign = -1
-			}
+		case b == '+' && state == 3:
+			expSign = 1
+		case b == '-' && state == 3:
+			expSign = -1
 		default:
-			if state == 0 {
-				return 0, 0, fmt.Errorf("unexpected %q at start of number", b)
-			}
-			v *= sign
-			if state == 4 {
-				e := exp * expSign
-				if e >= 0 {
-					for k := 0; k < e; k++ {
-						v *= 10
-					}
+			if exp != 0 {
+				pow := 1.0
+				for i := 0; i < exp; i++ {
+					pow *= 10
+				}
+				if expSign < 0 {
+					v /= pow
 				} else {
-					for k := 0; k < -e; k++ {
-						v *= 0.1
-					}
+					v *= pow
 				}
 			}
-			return float32(v), b, nil
+			return float32(v * sign), b, nil
 		}
 	}
 }
 
 func readLabel(br *bufio.Reader) (bool, error) {
-	var buf [5]byte
-	if _, err := io.ReadFull(br, buf[:]); err != nil {
-		return false, err
-	}
-	next, err := br.ReadByte()
+	b, err := br.ReadByte()
 	if err != nil {
 		return false, err
 	}
-	if next != '"' {
-		return false, fmt.Errorf("expected '\"' after label, got %q", next)
-	}
-	switch buf {
-	case [5]byte{'f', 'r', 'a', 'u', 'd'}:
-		return true, nil
-	case [5]byte{'l', 'e', 'g', 'i', 't'}:
-		return false, nil
-	}
-	return false, fmt.Errorf("unknown label %q", buf)
+	return b == 'F', nil
 }
