@@ -86,6 +86,31 @@ The reference dataset is a 3M-entry JSON array (~70 MB uncompressed). Stdlib `en
 
 `dataset.scan` streams gzip+bufio and decodes by hand: scan for `"vector":[`, parse 14 floats, scan for `,"label":"`, parse `fraud`/`legit`. Zero per-entry allocation; we fill the `Vectors` and `Labels` slabs directly. Two passes (count, then fill) so the slabs are sized exactly.
 
+## Dataset distribution — the gotcha
+
+The rinha test infra does **not** mount `references.json.gz` into the container. Submissions are expected to bake it in at build time (the FAQ: *"Pre-process the dataset during the container build"*). Our `deploy/Dockerfile` does this with `COPY references/rinha-official/resources/references.json.gz /resources/`. The file is ~48 MB compressed, adding ~48 MB to the image size — still small overall.
+
+Local benches must mirror this: do **not** mount `/resources` as a volume override (that would hide the in-image copy and pass on Rosetta while the rinha env fails). The local override now only bumps HAProxy memory (Rosetta JIT overhead).
+
+## 16-lane vector layout
+
+Each vector is stored as 16 int16s (`Stride = 16`) instead of 14. The two trailing lanes are always zero in both reference vectors and queries. Padding to 16 makes the AVX2 / SSE4.1 kernel layout-clean — `PSUBW` over 8 int16s × 2 chunks, then `PMADDWL` on the diffs to get squared pairs, no masking. Real dims (0-13) are unaffected.
+
+## AVX2 / SSE4.1 squared-distance kernel
+
+`internal/search/sqdist_amd64.s` computes the 16-lane squared Euclidean distance via:
+
+1. `PSUBW` — 8 int16 diffs per chunk, 2 chunks total.
+2. `PMADDWL` — pairs each chunk's diffs into 4 int32 squared-sums.
+3. `PMOVSXDQ` — sign-extend each chunk's 4 int32s to two pairs of int64s before summing. This step is load-bearing: without it, two int32 chunks summed in int32 (`PADDD`) can overflow on extreme inputs (peak per-int32 sum reaches ~4.1e9, beyond int32 max).
+4. `PEXTRQ` + scalar `ADDQ` — final reduction to one int64.
+
+Selected at request entry via `cpu.X86.HasAVX2` (set once at init). Non-amd64 builds (`//go:build !amd64`) compile out the asm entirely and force the scalar fallback. Mac Mini Late 2014 (Haswell) supports AVX2/SSE4.1 natively.
+
+### Why per-dim early-exit was traded away
+
+The scalar kernel bails out of the inner squared-distance loop as soon as the accumulated distance exceeds the current 5th-best. SIMD computes all 14 (+2 padding) dims at once — no way to bail mid-vector. The trade is worth it: even with no early-exit, the SIMD instruction does the equivalent of 8 int16 subtracts + 8 squarings + 4 int32 adds in ~3 instruction slots, several × faster than the scalar inner loop's best case.
+
 ## Submission-branch shape
 
 The `submission` branch contains only what the Rinha Engine runs:

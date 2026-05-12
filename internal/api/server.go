@@ -1,8 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -77,9 +79,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleReady(w, r)
 	case "/fraud-score":
 		h.handleFraudScore(w, r)
+	case "/debug/info":
+		h.handleDebugInfo(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleDebugInfo reports runtime state — used to verify on the rinha test
+// env that the SIMD path is active, the dataset is loaded, and heap is
+// where we expect.
+func (h *Handler) handleDebugInfo(w http.ResponseWriter, _ *http.Request) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	ds := h.ds.Load()
+	var count int
+	if ds != nil {
+		count = ds.Count
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w,
+		`{"useAVX2":%t,"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
+		search.UseAVX2(),
+		count,
+		h.ready.Load(),
+		m.HeapInuse/(1<<20),
+		m.TotalAlloc/(1<<20),
+		runtime.GOARCH,
+		runtime.GOOS,
+		runtime.GOMAXPROCS(0),
+	)
 }
 
 func (h *Handler) handleReady(w http.ResponseWriter, _ *http.Request) {
