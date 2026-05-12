@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/api"
+	"github.com/muanlartins/rinha-de-backend-2026/internal/fdpass"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 )
 
@@ -31,6 +32,21 @@ func main() {
 		log.Fatalf("listen on %q: %v", socketPath, err)
 	}
 	log.Printf("listening on %s", socketPath)
+
+	// Optional fd-passing control channel. The fd-passing LB (jrblatt/
+	// so-no-forevis) sends accepted TCP client fds over this socket via
+	// SCM_RIGHTS; we adopt them as if we had locally accept()ed. The
+	// regular UDS accept loop above still serves as a fallback when the
+	// LB falls back to TCP proxy. See docs/lectures/12-scm-rights.md.
+	if ctrlPath := os.Getenv("API_CTRL_SOCKET"); ctrlPath != "" {
+		fdCh, _, err := fdpass.Listen(ctrlPath)
+		if err != nil {
+			log.Printf("WARN: fdpass listen on %q failed: %v", ctrlPath, err)
+		} else {
+			log.Printf("fdpass listening on %s", ctrlPath)
+			go api.ServeFDChannel(fdCh, handler)
+		}
+	}
 
 	if _, err := os.Stat(indexPath); errors.Is(err, os.ErrNotExist) {
 		log.Printf("WARN: %s not found; coming up in stub mode", indexPath)

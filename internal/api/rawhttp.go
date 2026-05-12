@@ -95,6 +95,26 @@ func ListenRaw(path string, h *Handler) error {
 	return nil
 }
 
+// ServeFDChannel adopts fds received over an SCM_RIGHTS control channel and
+// runs handleRawConn on each, exactly like the local accept path. fdCh is
+// closed by the fdpass listener on shutdown; this function returns when
+// the channel closes.
+//
+// The fd is wrapped via os.NewFile + net.FileConn. The os.File is closed
+// after FileConn returns; the kernel keeps the underlying socket alive via
+// the net.Conn's own refcount. See docs/lectures/12-scm-rights.md.
+func ServeFDChannel(fdCh <-chan int, h *Handler) {
+	for fd := range fdCh {
+		f := os.NewFile(uintptr(fd), "scm-fd")
+		c, err := net.FileConn(f)
+		_ = f.Close()
+		if err != nil {
+			continue
+		}
+		go handleRawConn(c, h)
+	}
+}
+
 func handleRawConn(conn net.Conn, h *Handler) {
 	defer conn.Close()
 	bufRef := rawReadBufPool.Get().(*[]byte)
