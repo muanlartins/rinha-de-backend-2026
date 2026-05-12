@@ -26,6 +26,7 @@ type Dataset struct {
 	PartitionStarts [NumPartitions]uint32
 	PartitionCounts [NumPartitions]uint32
 	Partitions      []*Partition
+	IVF             []*IVFPartition
 }
 
 // LoadFromGzipJSON streams references.json.gz in two passes (count, then

@@ -162,6 +162,9 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 	}
 }
 
+// permuteInPartition reorders vectors+labels in [pStart, pStart+pCount) via
+// cycle decomposition. cellKeys is optional shadow data shuffled along with
+// the permutation; pass nil if the caller doesn't track it.
 func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKeys []uint32) {
 	visited := make([]bool, pCount)
 	var buf [Stride]int16
@@ -174,7 +177,10 @@ func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKe
 
 		copy(buf[:], ds.Vectors[(pStart+i)*Stride:(pStart+i+1)*Stride])
 		labelBuf := ds.Labels[pStart+i]
-		keyBuf := cellKeys[i]
+		var keyBuf uint32
+		if cellKeys != nil {
+			keyBuf = cellKeys[i]
+		}
 
 		j := i
 		for {
@@ -183,12 +189,16 @@ func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKe
 			if next == i {
 				copy(ds.Vectors[(pStart+j)*Stride:(pStart+j+1)*Stride], buf[:])
 				ds.Labels[pStart+j] = labelBuf
-				cellKeys[j] = keyBuf
+				if cellKeys != nil {
+					cellKeys[j] = keyBuf
+				}
 				break
 			}
 			copy(ds.Vectors[(pStart+j)*Stride:(pStart+j+1)*Stride], ds.Vectors[(pStart+next)*Stride:(pStart+next+1)*Stride])
 			ds.Labels[pStart+j] = ds.Labels[pStart+next]
-			cellKeys[j] = cellKeys[next]
+			if cellKeys != nil {
+				cellKeys[j] = cellKeys[next]
+			}
 			j = next
 		}
 	}
