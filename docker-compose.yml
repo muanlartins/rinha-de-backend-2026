@@ -8,6 +8,12 @@ services:
       - API_SOCKET=/var/run/rinha/api1.sock
     volumes:
       - socket-dir:/var/run/rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
     deploy:
       resources:
         limits:
@@ -23,6 +29,12 @@ services:
       - API_SOCKET=/var/run/rinha/api2.sock
     volumes:
       - socket-dir:/var/run/rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
     deploy:
       resources:
         limits:
@@ -43,6 +55,12 @@ services:
     depends_on:
       - api-1
       - api-2
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
     deploy:
       resources:
         limits:
