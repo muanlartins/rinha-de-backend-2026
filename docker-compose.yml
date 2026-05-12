@@ -6,6 +6,8 @@ services:
     container_name: rinha-go-api-1
     environment:
       - API_SOCKET=/var/run/rinha/api1.sock
+      - SHED_SLOTS=4
+      - SHED_TIMEOUT_MS=3
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
@@ -27,6 +29,8 @@ services:
     container_name: rinha-go-api-2
     environment:
       - API_SOCKET=/var/run/rinha/api2.sock
+      - SHED_SLOTS=4
+      - SHED_TIMEOUT_MS=3
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
