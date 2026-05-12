@@ -1,50 +1,31 @@
 package dataset
 
-import (
-	"slices"
-)
+import "slices"
 
-// Partition is a per-partition grid index built on top of the int16 vector
-// slab. After BuildGrid(), references inside a partition are reordered so
-// that all vectors belonging to the same cell sit consecutive.
 type Partition struct {
 	NumCells   int
-	CellStarts []uint32 // index into ds.Vectors (absolute, not partition-relative)
+	CellStarts []uint32
 	CellCounts []uint32
 
-	// Axis-aligned bounding boxes, flattened: BboxMin[cell*Dims + d].
-	// Tracked for all 14 dims (including the partition-constant ones) so the
-	// search code's LB sweep can use the same indexing convention.
+	// Flattened per-cell AABBs over all 14 dims: BboxMin[cell*Dims + d].
 	BboxMin []int16
 	BboxMax []int16
 
-	// Which dims are used to compute the cell key. Length 1..3 in practice.
 	GridDims   []uint8
 	BinsPerDim []uint16
-	// Boundaries are packed: for dim i with bins b, there are b-1 boundaries
-	// laid out consecutively. Sum-of-(b-1) = len(Boundaries).
 	Boundaries []int16
 }
 
-// Grid dimension selection per partition:
-//
-//   - dim 0 (amount):     16 bins, percentile-based
-//   - dim 12 (mcc_risk):  8 bins
-//   - dim 6 (km_from_last_tx)  for non-sentinel partitions (bit 4 unset): 8 bins
-//   - dim 7 (km_from_home) for sentinel partitions (bit 4 set): 8 bins
-//
-// This matches QRust's tuning. The choice of grid dims matters less than the
-// fact that we *partition* on them.
+// selectGridDims: for sentinel partitions (dim 6 pinned to SentinelInt),
+// substitute dim 7 since dim 6 carries no information.
 func selectGridDims(key uint8) ([]uint8, []uint16) {
 	if key&0x10 != 0 {
-		// dim 6 is pinned to SentinelInt for this partition; substitute dim 7.
 		return []uint8{0, 12, 7}, []uint16{16, 8, 8}
 	}
 	return []uint8{0, 12, 6}, []uint16{16, 8, 8}
 }
 
-// BuildGrid builds a per-partition grid for every non-empty partition. Must
-// be called after Partition().
+// BuildGrid must run after Partition().
 func (ds *Dataset) BuildGrid() {
 	ds.Partitions = make([]*Partition, NumPartitions)
 	for k := uint8(0); k < NumPartitions; k++ {
@@ -61,14 +42,13 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 
 	gridDims, binsPerDim := selectGridDims(key)
 
-	// === 1. compute percentile boundaries per grid dim
 	var totalBounds int
 	for _, b := range binsPerDim {
 		totalBounds += int(b) - 1
 	}
 	boundaries := make([]int16, totalBounds)
 
-	tmp := make([]int16, pCount) // scratch for sorting one dim's values
+	tmp := make([]int16, pCount)
 	bOff := 0
 	for gi, dim := range gridDims {
 		bins := int(binsPerDim[gi])
@@ -84,7 +64,6 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		bOff += numBounds
 	}
 
-	// === 2. assign each vector to a cell
 	cellKeys := make([]uint32, pCount)
 	for j := uint32(0); j < pCount; j++ {
 		base := (pStart + j) * Dims
@@ -108,15 +87,10 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		cellKeys[j] = ck
 	}
 
-	// === 3. reorder partition's vectors so same-cell are contiguous
-	//
-	// We compute destination indices, then permute in-place via cycle
-	// decomposition (the same trick used in Partition()).
 	counts := map[uint32]uint32{}
 	for _, ck := range cellKeys {
 		counts[ck]++
 	}
-	// Sort cell keys to give cells deterministic ids.
 	uniqueKeys := make([]uint32, 0, len(counts))
 	for ck := range counts {
 		uniqueKeys = append(uniqueKeys, ck)
@@ -134,10 +108,7 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		cellStartsLocal[ci] = cellStartsLocal[ci-1] + cellCountsLocal[ci-1]
 	}
 
-	// Build the source map (inverse of the forward destination map): src[p]
-	// is the partition-relative index of the vector that should end up at
-	// partition-relative position p. The permutation routine walks cycles of
-	// this src map.
+	// Inverse / source map for the cycle walker. See docs/CODE_NOTES.md.
 	src := make([]uint32, pCount)
 	cursors := slices.Clone(cellStartsLocal)
 	for j := uint32(0); j < pCount; j++ {
@@ -148,7 +119,6 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 
 	permuteInPartition(ds, pStart, pCount, src, cellKeys)
 
-	// === 4. compute per-cell AABBs over all 14 dims
 	numCells := len(uniqueKeys)
 	bboxMin := make([]int16, numCells*Dims)
 	bboxMax := make([]int16, numCells*Dims)
@@ -174,8 +144,6 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		}
 	}
 
-	// Cell starts in absolute (whole-dataset) coordinates make the search
-	// loop's indexing trivial.
 	absStarts := make([]uint32, numCells)
 	for ci := 0; ci < numCells; ci++ {
 		absStarts[ci] = pStart + cellStartsLocal[ci]
@@ -193,10 +161,6 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 	}
 }
 
-// permuteInPartition rotates vectors+labels in [pStart, pStart+pCount) so
-// that the vector currently at partition-relative position src[p] ends up at
-// position p. cellKeys is shuffled along so the per-cell metadata can be
-// computed from the now-sorted partition.
 func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKeys []uint32) {
 	visited := make([]bool, pCount)
 	var buf [Dims]int16
@@ -207,8 +171,6 @@ func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKe
 			continue
 		}
 
-		// Capture the value currently at position i; we'll fill it last after
-		// walking the rest of the cycle.
 		copy(buf[:], ds.Vectors[(pStart+i)*Dims:(pStart+i+1)*Dims])
 		labelBuf := ds.Labels[pStart+i]
 		keyBuf := cellKeys[i]

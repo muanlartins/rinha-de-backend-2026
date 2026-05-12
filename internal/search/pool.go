@@ -2,13 +2,10 @@ package search
 
 import "sync"
 
-// maxCellsHint is the worst-case number of cells across all partitions in the
-// reference dataset. Used to size the scratch buffers so we never have to
-// grow them. Grid v2 with bin layout (16, 8, 8) caps at 1024 cells; QRust's
-// build typically lands ~370 cells per non-empty partition.
+// maxCellsHint sizes the pooled scratch buffers for the worst-case partition.
+// Grid V2 with bin layout (16, 8, 8) caps at 1024 cells.
 const maxCellsHint = 1024
 
-// scratch holds per-request reusable buffers for the grid search.
 type scratch struct {
 	cellLBs     []int64
 	sortedCells []int

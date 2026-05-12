@@ -6,19 +6,8 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 )
 
-// FraudCountGrid returns the number of fraud labels among the 5 nearest
-// neighbors of query, using the per-partition grid + axis-aligned-bbox lower
-// bound for cell pruning.
-//
-// Algorithm:
-//  1. compute partition key, fetch partition's grid
-//  2. compute lower-bound squared distance to each cell's bbox
-//  3. sort cells by LB ascending
-//  4. iterate cells; break when LB >= topD5²; otherwise run the early-exit
-//     squared-distance kernel against every vector in the cell
-//
-// Allocation per call: two small slices (cellLBs + sortedCells). The whole
-// thing fits in ~8 KB even for the worst partition (1024 cells).
+// FraudCountGrid is the production search path. See docs/CODE_NOTES.md
+// "Grid V2" for the LB-pruning and AABB rationale.
 func FraudCountGrid(query *[dims]int16, ds *dataset.Dataset) int {
 	key := dataset.ComputeKey(query)
 	pg := ds.Partitions[key]
@@ -64,7 +53,6 @@ func FraudCountGrid(query *[dims]int16, ds *dataset.Dataset) int {
 		}
 		lb = addAxisLB(lb, q7, int32(bboxMin[mi+7]), int32(bboxMax[mi+7]))
 		lb = addAxisLB(lb, q8, int32(bboxMin[mi+8]), int32(bboxMax[mi+8]))
-		// dims 9, 10, 11 are partition-constant, contribute 0
 		lb = addAxisLB(lb, q12, int32(bboxMin[mi+12]), int32(bboxMax[mi+12]))
 		lb = addAxisLB(lb, q13, int32(bboxMin[mi+13]), int32(bboxMax[mi+13]))
 		cellLBs[ci] = lb
@@ -207,12 +195,6 @@ func FraudCountGrid(query *[dims]int16, ds *dataset.Dataset) int {
 	return frauds
 }
 
-// addAxisLB adds the per-axis lower bound to lb. Returns the new lb.
-// Formula:
-//
-//	if q < min:  add (min - q)²
-//	if q > max:  add (q - max)²
-//	otherwise:   add 0
 func addAxisLB(lb int64, q, min, max int32) int64 {
 	if q < min {
 		d := int64(min - q)

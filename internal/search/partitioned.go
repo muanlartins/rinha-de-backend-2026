@@ -2,17 +2,9 @@ package search
 
 import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 
-// FraudCountPartitioned returns the number of fraud labels among the 5 nearest
-// neighbors of query, scanning *only* the partition that the query belongs to.
-//
-// Correctness: a reference vector in a different partition disagrees with the
-// query on at least one of {is_online, card_present, unknown_merchant,
-// last_tx_sentinel}. Each such disagreement contributes at least
-// `QuantScale^2 = 32000^2` (or `(2*32000)^2` for the sentinel bit-3/4) to the
-// squared distance — orders of magnitude larger than within-partition
-// distances. So the true top-5 always lives in the query's own partition,
-// provided the partition has ≥5 references (which holds for every partition
-// in the official dataset).
+// FraudCountPartitioned scans only the query's own partition. The true KNN-5
+// always lives there — see docs/CODE_NOTES.md "Partition key" for the proof.
+// Kept for verification; the grid path supersedes it in production.
 func FraudCountPartitioned(query *[dims]int16, ds *dataset.Dataset) int {
 	key := dataset.ComputeKey(query)
 	start := int(ds.PartitionStarts[key])
@@ -43,13 +35,8 @@ func FraudCountPartitioned(query *[dims]int16, ds *dataset.Dataset) int {
 	q8 := int32(query[8])
 	q12 := int32(query[12])
 	q13 := int32(query[13])
-	// Dims 9, 10, 11 are partition-pinned: q[d] == v[d] for every v in this
-	// partition, so they contribute exactly 0 to the squared distance and
-	// the inner loop can skip them entirely.
-	//
-	// Dims 5, 6: if this partition is a sentinel partition (bit 3 or 4 set
-	// in the key), they're also pinned to SentinelInt and we skip them. We
-	// branch once outside the loop instead of per-vector.
+	// Dims 9, 10, 11 are partition-constant; dims 5, 6 are partition-constant
+	// when the corresponding sentinel bit is set in key.
 	isSentinel5 := (key & 0x08) != 0
 	isSentinel6 := (key & 0x10) != 0
 

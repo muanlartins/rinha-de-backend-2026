@@ -1,14 +1,3 @@
-// Package dataset loads the 3M-vector reference set into memory as int16-
-// quantized values.
-//
-// Streams references.json.gz with a hand-rolled byte-level parser to avoid the
-// 300+ MB transient allocation that stdlib's encoding/json incurs on a 3M-entry
-// array. Quantizes during the fill pass so the final footprint is just the
-// int16 buffer (~84 MB) plus the label byte array (~3 MB).
-//
-// Quantization: real-valued dims in [0,1] → [0, 32000]. Sentinel -1 → -32000.
-// Maximum squared distance per dim within a partition fits in int32, summed
-// across 14 dims fits in int64.
 package dataset
 
 import (
@@ -26,15 +15,6 @@ const (
 	SentinelReal = -1.0
 )
 
-// Dataset is the in-memory reference set.
-//
-// Vectors is laid out flat: vectors[i*Dims + d] is dim d of vector i.
-// Labels[i] is 1 for "fraud", 0 for "legit".
-//
-// After Partition() runs, vectors with the same partition key live in a
-// contiguous block; PartitionStarts[k] and PartitionCounts[k] locate that
-// block for partition key k. After BuildGrid() runs, Partitions[k] holds the
-// per-partition cell index for grid-based search.
 type Dataset struct {
 	Vectors         []int16
 	Labels          []uint8
@@ -44,9 +24,10 @@ type Dataset struct {
 	Partitions      []*Partition
 }
 
-// LoadFromGzipJSON streams the official references.json.gz into memory in two
-// passes: first counts entries (so we allocate Vectors and Labels exactly),
-// then fills them in-place. Per-entry heap allocation is zero.
+// LoadFromGzipJSON streams references.json.gz in two passes (count, then
+// fill) so Vectors and Labels are sized exactly. Per-entry alloc: zero.
+// Stdlib encoding/json over 3M entries allocates ~300 MB transient, which
+// overshoots the 167 MB cgroup before we serve a single request.
 func LoadFromGzipJSON(path string) (*Dataset, error) {
 	count, err := scan(path, nil)
 	if err != nil {
@@ -79,9 +60,6 @@ func LoadFromGzipJSON(path string) (*Dataset, error) {
 	return ds, nil
 }
 
-// Quantize converts a normalized float dim value to int16. Returns the sentinel
-// constant for -1.0; otherwise scales [0,1] to [0, QuantScale] with clamping
-// and round-half-up.
 func Quantize(v float32) int16 {
 	return quantize(v)
 }
@@ -99,8 +77,6 @@ func quantize(v float32) int16 {
 	return int16(v*QuantScale + 0.5)
 }
 
-// scan opens path as gzip+JSON and invokes cb (if non-nil) for every entry.
-// Returns the count of entries seen.
 func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -123,7 +99,6 @@ func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 	var vec [Dims]float32
 
 	for {
-		// Find the start of the next entry's vector array.
 		if err := readUntil(br, vectorKey); err != nil {
 			if err == io.EOF {
 				return count, nil
@@ -131,7 +106,6 @@ func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 			return count, fmt.Errorf("scan vector key (entry %d): %w", count, err)
 		}
 
-		// 14 comma-separated floats followed by ']'.
 		for i := 0; i < Dims; i++ {
 			v, last, err := readFloat(br)
 			if err != nil {
@@ -146,7 +120,6 @@ func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 			}
 		}
 
-		// Label key then label string.
 		if err := readUntil(br, labelKey); err != nil {
 			return count, fmt.Errorf("scan label key (entry %d): %w", count, err)
 		}
@@ -162,9 +135,7 @@ func scan(path string, cb func(vec [Dims]float32, isFraud bool)) (int, error) {
 	}
 }
 
-// readUntil consumes bytes until needle is fully matched. The keys we use
-// ("\"vector\":[", ",\"label\":\"") have no proper prefix that's also a suffix,
-// so we can reset matched on mismatch without backtracking.
+// readUntil works because our two keys have no proper-prefix-equal-suffix.
 func readUntil(br *bufio.Reader, needle string) error {
 	nlen := len(needle)
 	matched := 0
@@ -187,8 +158,6 @@ func readUntil(br *bufio.Reader, needle string) error {
 	}
 }
 
-// readFloat parses a JSON number. Returns the parsed value and the
-// terminator byte (e.g., ',' or ']').
 func readFloat(br *bufio.Reader) (val float32, last byte, err error) {
 	var v float64
 	var sign float64 = 1
@@ -248,7 +217,6 @@ func readFloat(br *bufio.Reader) (val float32, last byte, err error) {
 	}
 }
 
-// readLabel reads a 5-char label ("fraud" or "legit") followed by '"'.
 func readLabel(br *bufio.Reader) (bool, error) {
 	var buf [5]byte
 	if _, err := io.ReadFull(br, buf[:]); err != nil {

@@ -2,14 +2,7 @@ package dataset
 
 const NumPartitions = 32
 
-// Partition key bit layout (matches the reference QRust implementation so the
-// dataset and query agree on every vector's home partition):
-//
-//   bit 0: query[9]  != 0   (is_online)
-//   bit 1: query[10] != 0   (card_present)
-//   bit 2: query[11] != 0   (unknown_merchant)
-//   bit 3: query[5]  == sentinel (no previous-tx minutes)
-//   bit 4: query[6]  == sentinel (no previous-tx km)
+// ComputeKey: 5-bit partition key. See docs/CODE_NOTES.md for the bit layout.
 func ComputeKey(v *[Dims]int16) uint8 {
 	var key uint8
 	if v[9] != 0 {
@@ -51,44 +44,35 @@ func computeKeyByIndex(vectors []int16, i int) uint8 {
 	return key
 }
 
-// Partition reorders the dataset's vectors and labels in-place so that all
-// vectors with the same partition key live in a contiguous block, and fills
-// in PartitionStarts/PartitionCounts. Counting sort, O(N * Dims).
 func (ds *Dataset) Partition() {
-	// Count.
 	counts := [NumPartitions]uint32{}
 	for i := 0; i < ds.Count; i++ {
 		counts[computeKeyByIndex(ds.Vectors, i)]++
 	}
 	ds.PartitionCounts = counts
 
-	// Prefix-sum into start offsets.
 	var starts [NumPartitions]uint32
 	for i := 1; i < NumPartitions; i++ {
 		starts[i] = starts[i-1] + counts[i-1]
 	}
 	ds.PartitionStarts = starts
 
-	// Compute every vector's partition key, then permute in place using a
-	// cycle decomposition. We need the SOURCE map (src[p] = original index of
-	// the vector that should end up at position p), so we first build the
-	// forward dest map and then invert it.
 	keys := make([]uint8, ds.Count)
 	for i := 0; i < ds.Count; i++ {
 		keys[i] = computeKeyByIndex(ds.Vectors, i)
 	}
 
+	// src is the inverse permutation: src[p] = original index of the vector
+	// that belongs at position p. The cycle walker below expects this form
+	// (see docs/CODE_NOTES.md "Cycle-sort permutation" for why).
 	cursors := starts
 	src := make([]uint32, ds.Count)
 	for i := 0; i < ds.Count; i++ {
 		k := keys[i]
-		// vector i lands at cursors[k], so src[cursors[k]] = i
 		src[cursors[k]] = uint32(i)
 		cursors[k]++
 	}
 
-	// Permute: follow cycles of src[]. At each step, vectors[j] receives
-	// vectors[src[j]] (the vector that belongs at j).
 	visited := make([]bool, ds.Count)
 	var buf [Dims]int16
 	for i := 0; i < ds.Count; i++ {

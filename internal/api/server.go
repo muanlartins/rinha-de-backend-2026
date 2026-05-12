@@ -1,11 +1,9 @@
-// Package api implements the HTTP handlers for the two endpoints required by
-// the Rinha de Backend 2026 specification.
 package api
 
 import (
 	"io"
-	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
@@ -13,9 +11,37 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/vector"
 )
 
-// Six possible responses, indexed by fraud count 0..5.
-// fraud_score = count/5 ∈ {0, 0.2, 0.4, 0.6, 0.8, 1.0}
-// approved    = fraud_score < 0.6
+// Pooled 2 KB read buffer. Spec bodies are 500–700 bytes; io.ReadAll would
+// grow-and-allocate per request.
+var bodyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
+func readBodyInto(r io.Reader, buf []byte) ([]byte, error) {
+	buf = buf[:cap(buf)]
+	total := 0
+	for {
+		if total == len(buf) {
+			grown := make([]byte, len(buf)*2)
+			copy(grown, buf[:total])
+			buf = grown
+		}
+		n, err := r.Read(buf[total:])
+		total += n
+		if err == io.EOF {
+			return buf[:total], nil
+		}
+		if err != nil {
+			return buf[:total], err
+		}
+	}
+}
+
+// fraudResponses[count] is the pre-built body for fraud_count ∈ 0..5
+// (fraud_score = count/5, approved = fraud_score < 0.6).
 var fraudResponses = [6][]byte{
 	[]byte(`{"approved":true,"fraud_score":0}`),
 	[]byte(`{"approved":true,"fraud_score":0.2}`),
@@ -25,8 +51,6 @@ var fraudResponses = [6][]byte{
 	[]byte(`{"approved":false,"fraud_score":1}`),
 }
 
-// Handler carries the loaded dataset and a ready flag. Until the dataset is
-// set, /ready returns 503 so HAProxy keeps the upstream out of rotation.
 type Handler struct {
 	ready atomic.Bool
 	ds    atomic.Pointer[dataset.Dataset]
@@ -36,14 +60,13 @@ func NewHandler() *Handler {
 	return &Handler{}
 }
 
-// SetDataset publishes a loaded dataset and flips ready.
 func (h *Handler) SetDataset(ds *dataset.Dataset) {
 	h.ds.Store(ds)
 	h.ready.Store(true)
 }
 
-// MarkReady flips ready without a dataset — used by the smoke-only path when
-// /resources is not mounted. In this mode /fraud-score returns a fixed stub.
+// MarkReady flips ready without a dataset for the smoke-only path (no
+// /resources mount). /fraud-score then returns a fixed stub.
 func (h *Handler) MarkReady() {
 	h.ready.Store(true)
 }
@@ -79,28 +102,32 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	bufp := bodyBufPool.Get().(*[]byte)
+	body, err := readBodyInto(r.Body, *bufp)
 	if err != nil {
+		*bufp = body[:0]
+		bodyBufPool.Put(bufp)
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer func() {
+		*bufp = body[:0]
+		bodyBufPool.Put(bufp)
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 
 	ds := h.ds.Load()
 	if ds == nil {
-		// Stub mode (no dataset loaded). The smoke test only checks shape, so
-		// this is enough to pass.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(fraudResponses[0])
 		return
 	}
 
 	var query [14]int16
-	if err := vector.Vectorize(body, &query); err != nil {
-		log.Printf("vectorize: %v", err)
-		// Per scoring rules, a 5xx weighs more than a misclassification. When
-		// we can't parse, return approved=true with score 0 — minimal cost.
+	if !vector.VectorizeFast(body, &query) {
+		// HTTP 5xx weighs 5 in E; a misclassification weighs 1 or 3. On a
+		// parse miss, prefer approved=true / score=0 over a 5xx.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(fraudResponses[0])
 		return
