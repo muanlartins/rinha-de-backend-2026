@@ -7,7 +7,8 @@ type Partition struct {
 	CellStarts []uint32
 	CellCounts []uint32
 
-	// Flattened per-cell AABBs over all 14 dims: BboxMin[cell*Dims + d].
+	// Per-cell AABBs over all 14 dims, laid out at Stride to match the vector
+	// layout. Padded dims (14, 15) are always 0.
 	BboxMin []int16
 	BboxMax []int16
 
@@ -54,7 +55,7 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		bins := int(binsPerDim[gi])
 		numBounds := bins - 1
 		for j := uint32(0); j < pCount; j++ {
-			tmp[j] = ds.Vectors[(pStart+j)*Dims+uint32(dim)]
+			tmp[j] = ds.Vectors[(pStart+j)*Stride+uint32(dim)]
 		}
 		slices.Sort(tmp)
 		for b := 0; b < numBounds; b++ {
@@ -66,7 +67,7 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 
 	cellKeys := make([]uint32, pCount)
 	for j := uint32(0); j < pCount; j++ {
-		base := (pStart + j) * Dims
+		base := (pStart + j) * Stride
 		var ck uint32
 		bOff := 0
 		for gi, dim := range gridDims {
@@ -120,10 +121,10 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 	permuteInPartition(ds, pStart, pCount, src, cellKeys)
 
 	numCells := len(uniqueKeys)
-	bboxMin := make([]int16, numCells*Dims)
-	bboxMax := make([]int16, numCells*Dims)
+	bboxMin := make([]int16, numCells*Stride)
+	bboxMax := make([]int16, numCells*Stride)
 	for ci := 0; ci < numCells; ci++ {
-		mi := ci * Dims
+		mi := ci * Stride
 		for d := 0; d < Dims; d++ {
 			bboxMin[mi+d] = 32767
 			bboxMax[mi+d] = -32768
@@ -131,7 +132,7 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 		start := cellStartsLocal[ci]
 		count := cellCountsLocal[ci]
 		for k := uint32(0); k < count; k++ {
-			vBase := (pStart + start + k) * Dims
+			vBase := (pStart + start + k) * Stride
 			for d := 0; d < Dims; d++ {
 				v := ds.Vectors[vBase+uint32(d)]
 				if v < bboxMin[mi+d] {
@@ -163,7 +164,7 @@ func (ds *Dataset) buildPartitionGrid(key uint8) *Partition {
 
 func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKeys []uint32) {
 	visited := make([]bool, pCount)
-	var buf [Dims]int16
+	var buf [Stride]int16
 
 	for i := uint32(0); i < pCount; i++ {
 		if visited[i] || src[i] == i {
@@ -171,7 +172,7 @@ func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKe
 			continue
 		}
 
-		copy(buf[:], ds.Vectors[(pStart+i)*Dims:(pStart+i+1)*Dims])
+		copy(buf[:], ds.Vectors[(pStart+i)*Stride:(pStart+i+1)*Stride])
 		labelBuf := ds.Labels[pStart+i]
 		keyBuf := cellKeys[i]
 
@@ -180,12 +181,12 @@ func permuteInPartition(ds *Dataset, pStart, pCount uint32, src []uint32, cellKe
 			visited[j] = true
 			next := src[j]
 			if next == i {
-				copy(ds.Vectors[(pStart+j)*Dims:(pStart+j+1)*Dims], buf[:])
+				copy(ds.Vectors[(pStart+j)*Stride:(pStart+j+1)*Stride], buf[:])
 				ds.Labels[pStart+j] = labelBuf
 				cellKeys[j] = keyBuf
 				break
 			}
-			copy(ds.Vectors[(pStart+j)*Dims:(pStart+j+1)*Dims], ds.Vectors[(pStart+next)*Dims:(pStart+next+1)*Dims])
+			copy(ds.Vectors[(pStart+j)*Stride:(pStart+j+1)*Stride], ds.Vectors[(pStart+next)*Stride:(pStart+next+1)*Stride])
 			ds.Labels[pStart+j] = ds.Labels[pStart+next]
 			cellKeys[j] = cellKeys[next]
 			j = next

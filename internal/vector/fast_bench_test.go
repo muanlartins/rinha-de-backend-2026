@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 )
 
 func loadSamplePayloads(b *testing.B, n int) [][]byte {
@@ -37,7 +39,7 @@ func BenchmarkVectorizeFast(b *testing.B) {
 	if payloads == nil {
 		return
 	}
-	var out [14]int16
+	var out [dataset.Stride]int16
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -50,7 +52,7 @@ func BenchmarkVectorizeSlow(b *testing.B) {
 	if payloads == nil {
 		return
 	}
-	var out [14]int16
+	var out [dataset.Stride]int16
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

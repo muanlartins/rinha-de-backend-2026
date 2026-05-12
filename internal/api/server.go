@@ -122,7 +122,7 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var query [14]int16
+	var query [dataset.Stride]int16
 	if !vector.VectorizeFast(body, &query) {
 		// HTTP 5xx weighs 5 in E; a misclassification weighs 1 or 3. On a
 		// parse miss, prefer approved=true / score=0 over a 5xx.

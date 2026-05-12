@@ -12,7 +12,7 @@ import (
 
 // vectorizeSlow is a reference parser using encoding/json + time.Parse. Only
 // compiled in tests, used as the oracle that VectorizeFast must match.
-func vectorizeSlow(body []byte, out *[14]int16) error {
+func vectorizeSlow(body []byte, out *[dataset.Stride]int16) error {
 	type payload struct {
 		ID          string `json:"id"`
 		Transaction struct {
@@ -134,7 +134,7 @@ func TestVectorizeFastMatchesSlow(t *testing.T) {
 	}
 
 	for i, entry := range top.Entries {
-		var slow, fast [14]int16
+		var slow, fast [dataset.Stride]int16
 		if err := vectorizeSlow(entry.Request, &slow); err != nil {
 			t.Fatalf("entry %d slow: %v", i, err)
 		}

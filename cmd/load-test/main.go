@@ -39,9 +39,9 @@ func main() {
 		start := ds.PartitionStarts[k]
 		count := ds.PartitionCounts[k]
 		for i := start; i < start+count; i++ {
-			var v [dataset.Dims]int16
-			base := int(i) * dataset.Dims
-			copy(v[:], ds.Vectors[base:base+dataset.Dims])
+			var v [dataset.Stride]int16
+			base := int(i) * dataset.Stride
+			copy(v[:], ds.Vectors[base:base+dataset.Stride])
 			if int(dataset.ComputeKey(&v)) != k {
 				mismatches++
 				if mismatches <= 5 {

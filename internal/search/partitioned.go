@@ -5,7 +5,7 @@ import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 // FraudCountPartitioned scans only the query's own partition. The true KNN-5
 // always lives there — see docs/CODE_NOTES.md "Partition key" for the proof.
 // Kept for verification; the grid path supersedes it in production.
-func FraudCountPartitioned(query *[dims]int16, ds *dataset.Dataset) int {
+func FraudCountPartitioned(query *[stride]int16, ds *dataset.Dataset) int {
 	key := dataset.ComputeKey(query)
 	start := int(ds.PartitionStarts[key])
 	count := int(ds.PartitionCounts[key])
@@ -41,7 +41,7 @@ func FraudCountPartitioned(query *[dims]int16, ds *dataset.Dataset) int {
 	isSentinel6 := (key & 0x10) != 0
 
 	for i := start; i < end; i++ {
-		base := i * dims
+		base := i * stride
 
 		t := q0 - int32(vectors[base])
 		dist := int64(t) * int64(t)
