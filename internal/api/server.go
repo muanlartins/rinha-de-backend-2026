@@ -160,7 +160,7 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	frauds := search.FraudCountGrid(&query, ds)
+	frauds := search.FraudCountIVF(&query, ds)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(fraudResponses[frauds])
 }

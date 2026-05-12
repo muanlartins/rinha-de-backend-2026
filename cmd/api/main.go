@@ -73,8 +73,8 @@ func main() {
 		log.Printf("dataset partitioned in %s", time.Since(t1))
 
 		t2 := time.Now()
-		ds.BuildGrid()
-		log.Printf("grid built in %s", time.Since(t2))
+		ds.BuildIVF()
+		log.Printf("ivf built in %s", time.Since(t2))
 
 		runtime.GC()
 		handler.SetDataset(ds)
