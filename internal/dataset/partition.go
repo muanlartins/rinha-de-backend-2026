@@ -3,7 +3,7 @@ package dataset
 const NumPartitions = 32
 
 // ComputeKey: 5-bit partition key. See docs/CODE_NOTES.md for the bit layout.
-func ComputeKey(v *[Dims]int16) uint8 {
+func ComputeKey(v *[Stride]int16) uint8 {
 	var key uint8
 	if v[9] != 0 {
 		key |= 1
@@ -24,7 +24,7 @@ func ComputeKey(v *[Dims]int16) uint8 {
 }
 
 func computeKeyByIndex(vectors []int16, i int) uint8 {
-	base := i * Dims
+	base := i * Stride
 	var key uint8
 	if vectors[base+9] != 0 {
 		key |= 1
@@ -74,13 +74,13 @@ func (ds *Dataset) Partition() {
 	}
 
 	visited := make([]bool, ds.Count)
-	var buf [Dims]int16
+	var buf [Stride]int16
 	for i := 0; i < ds.Count; i++ {
 		if visited[i] || src[i] == uint32(i) {
 			visited[i] = true
 			continue
 		}
-		copy(buf[:], ds.Vectors[i*Dims:(i+1)*Dims])
+		copy(buf[:], ds.Vectors[i*Stride:(i+1)*Stride])
 		labelBuf := ds.Labels[i]
 		keyBuf := keys[i]
 		j := uint32(i)
@@ -88,12 +88,12 @@ func (ds *Dataset) Partition() {
 			visited[j] = true
 			next := src[j]
 			if next == uint32(i) {
-				copy(ds.Vectors[j*Dims:(j+1)*Dims], buf[:])
+				copy(ds.Vectors[j*Stride:(j+1)*Stride], buf[:])
 				ds.Labels[j] = labelBuf
 				keys[j] = keyBuf
 				break
 			}
-			copy(ds.Vectors[j*Dims:(j+1)*Dims], ds.Vectors[next*Dims:(next+1)*Dims])
+			copy(ds.Vectors[j*Stride:(j+1)*Stride], ds.Vectors[next*Stride:(next+1)*Stride])
 			ds.Labels[j] = ds.Labels[next]
 			keys[j] = keys[next]
 			j = next

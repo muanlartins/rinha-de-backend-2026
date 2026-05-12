@@ -44,7 +44,7 @@ func init() {
 // VectorizeFast parses body and fills out with int16 quantized dims. Returns
 // false on malformed payloads — caller must avoid producing an HTTP 5xx
 // (failure weight 5 in E; misclassification is at most 3).
-func VectorizeFast(body []byte, out *[14]int16) bool {
+func VectorizeFast(body []byte, out *[dataset.Stride]int16) bool {
 	p := 0
 
 	idx := bytes.Index(body[p:], kTransAmount)

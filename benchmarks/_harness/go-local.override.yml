@@ -1,31 +1,12 @@
-# LOCAL-ONLY override for benchmarking our Go submission on Apple Silicon.
+# LOCAL-ONLY override for benchmarking on Apple Silicon.
 #
-# Two things this changes vs the submission compose:
-#   1. Mounts the local references/rinha-official/resources directory at
-#      /resources (read-only) so the dataset loader can find references.json.gz.
-#      The rinha engine provides this mount in the official test environment.
-#   2. Bumps HAProxy memory from 15 MB to 64 MB. Under Rosetta x86 emulation
-#      on Apple Silicon, the haproxy binary's JIT translation cache pushes RSS
-#      past 15 MB and the worker gets OOM-killed mid-test. The actual Mac Mini
-#      Late 2014 test env (native amd64) keeps the 15 MB official limit.
-#
-# Usage from repo root:
-#   docker compose \
-#     -f deploy/docker-compose.yml \
-#     -f benchmarks/_harness/go-local.override.yml \
-#     up -d --build
-#
-# Via the bench harness:
-#   ./benchmarks/run.sh . local-dev benchmarks/_harness/go-local.override.yml
+# The references.json.gz is now baked into the image at /resources/, so no
+# volume mount is needed (and the rinha test env doesn't mount it either).
+# Only the HAProxy memory bump remains: under Rosetta x86 emulation the haproxy
+# binary's JIT translation cache pushes RSS past 15 MB and the worker gets
+# OOM-killed mid-test. The actual Mac Mini Late 2014 test env (native amd64)
+# stays inside the 15 MB official limit.
 services:
-  api-1:
-    volumes:
-      - /Users/muanlartins/repos/rinha-de-backend-2026/references/rinha-official/resources:/resources:ro
-
-  api-2:
-    volumes:
-      - /Users/muanlartins/repos/rinha-de-backend-2026/references/rinha-official/resources:/resources:ro
-
   lb:
     deploy:
       resources:

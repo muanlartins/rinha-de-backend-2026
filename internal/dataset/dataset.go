@@ -9,7 +9,11 @@ import (
 )
 
 const (
-	Dims         = 14
+	Dims = 14
+	// Stride pads each vector to 16 int16s (32 bytes) so the AVX2 kernel can
+	// run VPSUBW + VPMADDWD over a full YMM register with no masking. Dims
+	// 14 and 15 are reserved padding and always 0.
+	Stride       = 16
 	QuantScale   = 32000
 	SentinelInt  = -32000
 	SentinelReal = -1.0
@@ -35,14 +39,14 @@ func LoadFromGzipJSON(path string) (*Dataset, error) {
 	}
 
 	ds := &Dataset{
-		Vectors: make([]int16, count*Dims),
+		Vectors: make([]int16, count*Stride),
 		Labels:  make([]uint8, count),
 		Count:   count,
 	}
 
 	idx := 0
 	got, err := scan(path, func(vec [Dims]float32, isFraud bool) {
-		base := idx * Dims
+		base := idx * Stride
 		for d, v := range vec {
 			ds.Vectors[base+d] = quantize(v)
 		}

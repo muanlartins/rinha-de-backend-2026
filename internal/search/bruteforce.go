@@ -3,13 +3,14 @@ package search
 import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 
 const (
-	k    = 5
-	dims = dataset.Dims
+	k      = 5
+	dims   = dataset.Dims
+	stride = dataset.Stride
 )
 
 // FraudCount is the reference brute-force scanner. Kept for verification of
 // the grid path; not used in production.
-func FraudCount(query *[dims]int16, ds *dataset.Dataset) int {
+func FraudCount(query *[stride]int16, ds *dataset.Dataset) int {
 	vectors := ds.Vectors
 	labels := ds.Labels
 	n := ds.Count
@@ -37,7 +38,7 @@ func FraudCount(query *[dims]int16, ds *dataset.Dataset) int {
 	q13 := int32(query[13])
 
 	for i := 0; i < n; i++ {
-		base := i * dims
+		base := i * stride
 
 		t := q0 - int32(vectors[base])
 		dist := int64(t) * int64(t)
