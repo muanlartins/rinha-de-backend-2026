@@ -18,7 +18,10 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 7 | Flat IVF K=4096 with Lloyd k-means (rewrite) | local: 2888 | local 456ms | **Regression.** Lloyd k-means produces unbalanced clusters with meaningless centroids on discrete dims (online/card/unknown sit at intermediate 16000 values). 65 FP + 61 FN crossing threshold on local. |
 | 8 | Flat IVF K=8192 with balancedSplit + ambiguity expansion | TBD | TBD | Replaced Lloyd with josehenrique-dev-Go's recursive median-split on max-variance dim. Exactly balanced clusters. nprobe=32 fast + nprobe=128 on borderline. Local FP=4 FN=8. |
 | 9 | **Grid revival** — exact partitioned grid + AABB LB pruning + scalar early-exit | Mac Mini: **3065** | Mac Mini 567ms | Reverted to the algorithm of phase 1, now properly engineered: 32 partitions × ≤1024 cells × percentile-binned grid dims (0, 12, 7) × per-cell AABB. Drops the SIMD kernel (early-exit doesn't compose with 8-wide block ops). Restores exact KNN: **FP=0, FN=1, Err=0**. Mac Mini measured on commit `c4d219b` via issue [#3709](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/3709) — det_score = 2819 (max, modulo the 1 structural FN), p99_score = 246. All remaining gap is latency, not detection. See lecture 05. |
-| 10 | + GOAMD64=v3 + PGO + sort cells by dist-to-centroid | TBD | TBD | Three independent low-risk wins bundled. (1) Haswell baseline (SSE4.2/AVX/AVX2/FMA3) — default v1 leaves SSE off entirely. (2) Profile-guided optimization with a profile captured from the local handler bench and checked in as `cmd/api/default.pgo`. (3) Per-cell sort by squared distance to centroid at index build time — makes the early-exit kernel converge to a tight topD4 faster (Josiney's "Golden Optimization" from the survey). All build-time only; runtime correctness verified vs brute-force. |
+| 10 | + GOAMD64=v3 + PGO + sort cells by dist-to-centroid | Mac Mini: **3712** | Mac Mini 100.21ms | Three low-risk wins bundled, validated on Mac Mini via issue [#3727](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/3727). (1) Haswell baseline (SSE4.2/AVX/AVX2/FMA3) — default v1 leaves SSE off entirely. (2) Profile-guided optimization with a profile captured from the local handler bench and checked in as `cmd/api/default.pgo`. (3) Per-cell sort by squared distance to centroid at index build time — Josiney's "Golden Optimization". Net **+647** over phase 9 (3065). FP=0, FN=1, Err=1. Picked up 1 Err (likely queue-timeout under burst). |
+| 11 | int8 quantization | local: regression, NOT pushed | n/a | Tried per-dim linear int8 (scale 127, sentinel -127). `TestGridFullDataset` showed **FP=51, FN=62** — projected −1080 detection points. Local-bench latency win only 10 %. Net negative in every Haswell scenario. Reverted. Detailed in lecture 06. |
+| 12 | float32 with mmap-shared-tmpfs | local: regression, NOT pushed | n/a | Tried float32 storage to eliminate the 1 FN. Empirically **the 1 FN survives float32** — it's not a quantization artifact, it's a structural mismatch between our search and rinha's label generator (probably parser-related, on test-data.json entry 5472). Plus latency regressed 18 % locally (cache pressure from 84 → 168 MB). Reverted. Built `LoadIndexMmap` + cgroup-friendly shared-tmpfs design for archive purposes — usable if some future change wants the memory headroom. Detailed in lecture 06. |
+| 13 | Load shedder (1-slot semaphore + 3 ms timeout) | TBD | TBD | Josiney's tail-latency trick. `SHED_SLOTS=4`, `SHED_TIMEOUT_MS=3` exposed as env vars in compose so we can sweep without rebuilding. Shed response is `fraudResponses[0]` ("approved", fraud_score=0). Pure additive layer in `fraudScoreRaw`; phase 10 algorithm unchanged. Detailed in lecture 07. |
 
 ## What I learned
 
@@ -115,17 +118,37 @@ The single most impactful change of the session was a YAML one-liner. Without it
 
 Without these, ~1-3 requests per test would time out at 2001 ms during the k6 ramp. The fix in compose alone took detection score from 2713 → 2819 (+106 points).
 
-## What's next (open questions)
+## What's next (open questions, post-phase-13)
 
-After phase 9 (grid revival) the loss landscape changed shape. With detection essentially locked at FP=0/FN=1/Err=0, every remaining point comes from p99. Order of return now:
+After three rounds of Mac Mini testing (#3709 = 3065, #3727 = 3712, #3xxx-pending = phase 13), the score landscape is:
 
-1. **Submission compose tweaks** (`pull_policy: always`, `ulimits`, `seccomp:unconfined`) — re-applied to `submission/docker-compose.yml`. Phase 5 measured ~+150 points from these on the Mac Mini. The submission branch currently lacks them.
-2. **Push the new image to Docker Hub and open a `rinha/test` issue.** The local 80.91 ms p99 is a Rosetta-and-k6-contention number; the Mac Mini's behavior is shape-different (queue contention vs CPU contention) and only the bot will tell us the real value. Until we have a Mac Mini number, further local optimization is shadow-boxing.
-3. **Variance-ordered dim layout in the early-exit kernel.** We already put dims 0, 12, 7 first in the scan (high-variance), but inside the partition the *next-best discriminator* could be different. Not worth tuning until we have a Mac Mini number for comparison.
-4. **Float32 storage** to eliminate the 1 quantization FN. Cost: 168 MB > 167 MB cgroup, so requires shedding ~5 MB elsewhere. Payoff: +180 detection points. Marginal value vs latency work.
-5. **PGO** with a profile captured on the rinha bot. ~5–15 % across the board, but again needs a Mac Mini number to validate.
+```
+final_score 3712 / 6000
+├── det_score 2714 / 3000  (saturated modulo 1 structural FN + 1 random Err)
+└── p99_score  999 / 3000  (all remaining headroom is here — 100ms → 1ms = +2001)
+```
 
-The fundamental insight from this journey: **the top of the leaderboard is achieved by getting many small things right, not by one heroic optimization**. The compose-level tweaks (pull_policy, ulimits, seccomp) gained us ~150 points. The algorithm change (k-means → balancedSplit → grid revival) was net +700 points end-to-end. The block-major SIMD kernel was a wash on the Mac Mini despite being 8× wider locally and was retired in phase 9. Top Go submissions clustering between 5500-5900 final are doing **all** of these well, not picking one.
+Things we've **already eliminated** (don't retry without new evidence):
+
+- **int8 quantization** (lecture 06). Linear per-dim int8 → FP=51/FN=62 on full test set. Adaptive per-dim normalization changes geometry, deviates from labels. Spherical k-means is a centroid-only trick that doesn't fix per-vector noise. **Won't be a win in our exact-grid pipeline.**
+- **float32 storage** (lecture 06). The 1 structural FN is not a quantization artifact; float32 doesn't eliminate it. Doubled cache pressure also makes latency 18 % worse locally.
+
+Things still **on the table**:
+
+1. **Load shedder tuning sweep** (lecture 07). After phase 13's first result, sweep `SHED_SLOTS` ∈ {1, 2, 4, 8} and `SHED_TIMEOUT_MS` ∈ {1, 3, 5} from the compose to find the operating point with the best score. No code changes required.
+2. **shed-as-deny** instead of shed-as-approve. Expected weighted-E per shed is 0.56 (vs 1.32 for approve). One-line change if shed-as-approve doesn't carry its weight.
+3. **Find and fix the 1 structural FN.** It's not quantization (confirmed in phase 12). Likely the parser produces a different float64 for one specific timestamp/amount combo on test-data.json entry 5472. Bisect: dump our parsed query vs `vectorizeSlow`'s output for that entry. If they differ, fix the fast parser. Free +106 detection points.
+4. **SIMD asm distance kernel.** Phases 4-6 retired this. The early-exit kernel doesn't compose with 8-wide block ops cleanly, but a **VPDPBSSD** (AVX-VNNI) or **AVX-512** kernel can mask early-exit per lane — Mac Mini Haswell has neither, so this is a dead end without a hardware upgrade. Marking as "won't fit Mac Mini."
+5. **Look at top contestants once more.** The journey doc references `josehenrique-dev-Go (#23, p99 1.76ms)` — we haven't surveyed his full repo. A focused dive into how he gets sub-2ms with similar memory budget could surface a structural trick we're missing (a different data layout, a faster JSON parser, kernel work).
+6. **Profile the Mac Mini run.** Capture `pprof` from inside the container during a real bench run on the bot. We've been profile-blind since we can't replicate Mac Mini contention locally.
+
+What we should **not** do without more data:
+
+- Algorithm rewrites (we just did one with grid revival, returns are diminishing).
+- Compose CPU split sweeps (top-Go submissions converged on 0.10 / 0.45 / 0.45; we shouldn't fight it).
+- Switching from custom raw HTTP to fasthttp/etc. (phase 6 showed this isn't the bottleneck).
+
+The fundamental insight from this journey: **the top of the leaderboard is achieved by getting many small things right, not by one heroic optimization**. The compose-level tweaks (pull_policy, ulimits, seccomp) gained us ~150 points. The algorithm change (k-means → balancedSplit → grid revival) was net +700 points end-to-end. The block-major SIMD kernel was a wash on the Mac Mini despite being 8× wider locally and was retired in phase 9. **Quantization-width changes (int8, float32) both empirically regressed** despite our theoretical expectations — see lecture 06 for why. Top Go submissions clustering between 5500-5900 final are doing **all** of these well, not picking one.
 
 ## Phase 9 — what changed and what we learned
 
