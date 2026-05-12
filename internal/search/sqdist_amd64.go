@@ -9,6 +9,11 @@ import "golang.org/x/sys/cpu"
 // sqdist_amd64.s.
 func sqdistAVX2(query, ref *int16) int64
 
+// blockScan8AVX2 computes 8 squared distances from one query to 8 reference
+// vectors stored in dim-major block layout (16 dims × 8 vectors). Output is
+// 8 int64 distances. Implementation in blockdist_amd64.s.
+func blockScan8AVX2(query, block *int16, out *[8]int64)
+
 // useAVX2 is set at init by detecting CPU feature support. On the Rinha test
 // env (Mac Mini Late 2014 = Haswell) this is always true; on Rosetta 2 it
 // depends on macOS version.

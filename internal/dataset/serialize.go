@@ -7,13 +7,12 @@ import (
 	"os"
 )
 
-// indexMagic identifies a valid serialized dataset+IVF index.
-const indexMagic uint32 = 0x52494E48 // "RINH"
-const indexVersion uint32 = 1
+const (
+	indexMagic   uint32 = 0x52494E48 // "RINH"
+	indexVersion uint32 = 2          // v2 = block-major IVF
+)
 
-// SaveIndex writes the full dataset (vectors, labels, partitions, IVF) to
-// path in a compact binary format. The runtime loads it directly without
-// rebuilding from references.json.gz.
+// SaveIndex writes Blocks + Labels + per-partition IVF clusters (block-major).
 func (ds *Dataset) SaveIndex(path string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -21,18 +20,20 @@ func (ds *Dataset) SaveIndex(path string) error {
 	}
 	defer f.Close()
 
-	var hdr [16]byte
+	var hdr [32]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], indexMagic)
 	binary.LittleEndian.PutUint32(hdr[4:8], indexVersion)
 	binary.LittleEndian.PutUint64(hdr[8:16], uint64(ds.Count))
+	binary.LittleEndian.PutUint64(hdr[16:24], uint64(len(ds.Blocks)))
+	binary.LittleEndian.PutUint64(hdr[24:32], uint64(len(ds.BlockLabels)))
 	if _, err := f.Write(hdr[:]); err != nil {
 		return err
 	}
 
-	if _, err := f.Write(int16Bytes(ds.Vectors)); err != nil {
+	if _, err := f.Write(int16Bytes(ds.Blocks)); err != nil {
 		return err
 	}
-	if _, err := f.Write(ds.Labels); err != nil {
+	if _, err := f.Write(ds.BlockLabels); err != nil {
 		return err
 	}
 	for k := 0; k < NumPartitions; k++ {
@@ -62,9 +63,11 @@ func (ds *Dataset) SaveIndex(path string) error {
 			if _, err := f.Write(int16Bytes(c.Centroid[:])); err != nil {
 				return err
 			}
-			var meta [8]byte
-			binary.LittleEndian.PutUint32(meta[0:4], c.Start)
-			binary.LittleEndian.PutUint32(meta[4:8], c.Count)
+			var meta [16]byte
+			binary.LittleEndian.PutUint32(meta[0:4], c.BlockStart)
+			binary.LittleEndian.PutUint32(meta[4:8], c.LabelStart)
+			binary.LittleEndian.PutUint32(meta[8:12], c.Count)
+			binary.LittleEndian.PutUint32(meta[12:16], c.NumBlocks)
 			if _, err := f.Write(meta[:]); err != nil {
 				return err
 			}
@@ -76,11 +79,9 @@ func (ds *Dataset) SaveIndex(path string) error {
 			}
 		}
 	}
-
 	return nil
 }
 
-// LoadIndex reverses SaveIndex.
 func LoadIndex(path string) (*Dataset, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -88,31 +89,33 @@ func LoadIndex(path string) (*Dataset, error) {
 	}
 	defer f.Close()
 
-	var hdr [16]byte
+	var hdr [32]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
 	}
 	magic := binary.LittleEndian.Uint32(hdr[0:4])
 	version := binary.LittleEndian.Uint32(hdr[4:8])
 	if magic != indexMagic {
-		return nil, fmt.Errorf("bad magic: 0x%08x (want 0x%08x)", magic, indexMagic)
+		return nil, fmt.Errorf("bad magic: 0x%08x", magic)
 	}
 	if version != indexVersion {
 		return nil, fmt.Errorf("bad version: %d (want %d)", version, indexVersion)
 	}
 	count := int(binary.LittleEndian.Uint64(hdr[8:16]))
+	blocksLen := int(binary.LittleEndian.Uint64(hdr[16:24]))
+	labelsLen := int(binary.LittleEndian.Uint64(hdr[24:32]))
 
 	ds := &Dataset{
-		Count:   count,
-		Vectors: make([]int16, count*Stride),
-		Labels:  make([]uint8, count),
-		IVF:     make([]*IVFPartition, NumPartitions),
+		Count:       count,
+		Blocks:      make([]int16, blocksLen),
+		BlockLabels: make([]uint8, labelsLen),
+		IVF:         make([]*IVFPartition, NumPartitions),
 	}
-	if _, err := io.ReadFull(f, int16Bytes(ds.Vectors)); err != nil {
-		return nil, fmt.Errorf("read vectors: %w", err)
+	if _, err := io.ReadFull(f, int16Bytes(ds.Blocks)); err != nil {
+		return nil, fmt.Errorf("read blocks: %w", err)
 	}
-	if _, err := io.ReadFull(f, ds.Labels); err != nil {
-		return nil, fmt.Errorf("read labels: %w", err)
+	if _, err := io.ReadFull(f, ds.BlockLabels); err != nil {
+		return nil, fmt.Errorf("read blocklabels: %w", err)
 	}
 	for k := 0; k < NumPartitions; k++ {
 		var pbuf [8]byte
@@ -137,12 +140,14 @@ func LoadIndex(path string) (*Dataset, error) {
 			if _, err := io.ReadFull(f, int16Bytes(c.Centroid[:])); err != nil {
 				return nil, fmt.Errorf("read centroid %d: %w", ci, err)
 			}
-			var meta [8]byte
+			var meta [16]byte
 			if _, err := io.ReadFull(f, meta[:]); err != nil {
 				return nil, fmt.Errorf("read cluster meta %d: %w", ci, err)
 			}
-			c.Start = binary.LittleEndian.Uint32(meta[0:4])
-			c.Count = binary.LittleEndian.Uint32(meta[4:8])
+			c.BlockStart = binary.LittleEndian.Uint32(meta[0:4])
+			c.LabelStart = binary.LittleEndian.Uint32(meta[4:8])
+			c.Count = binary.LittleEndian.Uint32(meta[8:12])
+			c.NumBlocks = binary.LittleEndian.Uint32(meta[12:16])
 			if _, err := io.ReadFull(f, int16Bytes(c.BboxMin[:])); err != nil {
 				return nil, fmt.Errorf("read bboxMin %d: %w", ci, err)
 			}
@@ -155,13 +160,9 @@ func LoadIndex(path string) (*Dataset, error) {
 	return ds, nil
 }
 
-// int16Bytes reinterprets a []int16 as a []byte without copying.
 func int16Bytes(s []int16) []byte {
 	if len(s) == 0 {
 		return nil
 	}
-	// On all supported platforms, int16 is exactly 2 bytes and the runtime
-	// uses native byte order. We accept the host endianness as the on-disk
-	// endianness; the file is built and consumed on linux/amd64 only.
 	return unsafeSlice(&s[0], len(s)*2)
 }

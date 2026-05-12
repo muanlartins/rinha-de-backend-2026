@@ -6,19 +6,22 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 )
 
-// IVFNProbe: number of clusters scanned per query, sorted by centroid
-// distance ascending. With K=128 clusters per partition and ~735 vectors
-// per cluster, nprobe=8 scans ~5,900 vectors per query — comparable to a
-// well-pruned grid sweep, but with no per-cell LB recompute.
-var IVFNProbe = 8
+// IVFNProbe: number of clusters scanned per query, sorted by centroid LB
+// ascending. The bbox LB is a true lower bound, so the algorithm is EXACT
+// as long as we don't break out before LB exceeds the current top-5 — even
+// at small nprobe. The parameter mostly trades probe cost vs. early-quit
+// quality.
+var IVFNProbe = 128
 
-// FraudCountIVF: approximate KNN-5 via IVF. Compute distance to all K
-// centroids, sort, scan the IVFNProbe nearest clusters with the SIMD
-// kernel, return the fraud count among the 5 nearest.
+// FraudCountIVF: exact KNN-5 via IVF + per-block 8-wide SIMD scan.
+// Algorithm:
+//  1. Compute bbox LB to all clusters in the query's partition.
+//  2. Sort clusters by LB ascending.
+//  3. Walk clusters in that order; for each, scan its blocks with
+//     blockScan8AVX2 and update the top-5. Break when bbox LB ≥ topD5.
 //
-// Accuracy: ~99.9% of queries match exact brute-force in measurement
-// (a tiny number of borderline cases miss when the true 5th-nearest sits in
-// a cluster ranked beyond nprobe by centroid distance).
+// Correctness: identical results to brute force as long as the bbox LB is
+// computed correctly (it is — see clusterLB).
 func FraudCountIVF(query *[stride]int16, ds *dataset.Dataset) int {
 	key := dataset.ComputeKey(query)
 	pg := ds.IVF[key]
@@ -30,15 +33,9 @@ func FraudCountIVF(query *[stride]int16, ds *dataset.Dataset) int {
 	s := getScratch(numClusters)
 	defer putScratch(s)
 
-	centroidDists := s.cellLBs[:numClusters]
-	qPtr := &query[0]
+	cellLBs := s.cellLBs[:numClusters]
 	for ci := 0; ci < numClusters; ci++ {
-		c := &pg.Clusters[ci]
-		if useAVX2 {
-			centroidDists[ci] = sqdistAVX2(qPtr, &c.Centroid[0])
-		} else {
-			centroidDists[ci] = sqdistFallback(query, &c.Centroid)
-		}
+		cellLBs[ci] = clusterLB(query, &pg.Clusters[ci])
 	}
 
 	sorted := s.sortedCells[:numClusters]
@@ -47,209 +44,176 @@ func FraudCountIVF(query *[stride]int16, ds *dataset.Dataset) int {
 	}
 	slices.SortFunc(sorted, func(a, b int) int {
 		switch {
-		case centroidDists[a] < centroidDists[b]:
+		case cellLBs[a] < cellLBs[b]:
 			return -1
-		case centroidDists[a] > centroidDists[b]:
+		case cellLBs[a] > cellLBs[b]:
 			return 1
 		default:
 			return 0
 		}
 	})
 
-	nprobe := IVFNProbe
-	if nprobe > numClusters {
-		nprobe = numClusters
-	}
-
 	tk := newTopK()
 	if useAVX2 {
-		scanProbedAVX2(query, ds.Vectors, sorted[:nprobe], pg, &tk)
+		scanIVFBlocks(query, ds.Blocks, ds.BlockLabels, sorted, cellLBs, pg, &tk)
 	} else {
-		isSentinel5 := (key & 0x08) != 0
-		isSentinel6 := (key & 0x10) != 0
-		scanProbedScalar(query, ds.Vectors, sorted[:nprobe], pg, isSentinel5, isSentinel6, &tk)
+		scanIVFScalar(query, ds.Blocks, ds.BlockLabels, sorted, cellLBs, pg, &tk)
 	}
 
 	frauds := 0
-	labels := ds.Labels
-	if tk.i0 >= 0 && labels[tk.i0] == 1 {
+	if tk.lab0 == 1 {
 		frauds++
 	}
-	if tk.i1 >= 0 && labels[tk.i1] == 1 {
+	if tk.lab1 == 1 {
 		frauds++
 	}
-	if tk.i2 >= 0 && labels[tk.i2] == 1 {
+	if tk.lab2 == 1 {
 		frauds++
 	}
-	if tk.i3 >= 0 && labels[tk.i3] == 1 {
+	if tk.lab3 == 1 {
 		frauds++
 	}
-	if tk.i4 >= 0 && labels[tk.i4] == 1 {
+	if tk.lab4 == 1 {
 		frauds++
 	}
 	return frauds
 }
 
-func scanProbedAVX2(query *[stride]int16, vectors []int16, probed []int, pg *dataset.IVFPartition, tk *topK) {
+func clusterLB(query *[stride]int16, c *dataset.Cluster) int64 {
+	var lb int64
+	for d := 0; d < stride; d++ {
+		q := int32(query[d])
+		mn := int32(c.BboxMin[d])
+		mx := int32(c.BboxMax[d])
+		switch {
+		case q < mn:
+			t := int64(mn - q)
+			lb += t * t
+		case q > mx:
+			t := int64(q - mx)
+			lb += t * t
+		}
+	}
+	return lb
+}
+
+func scanIVFBlocks(query *[stride]int16, blocks []int16, blockLabels []uint8, sorted []int, cellLBs []int64, pg *dataset.IVFPartition, tk *topK) {
 	d0, d1, d2, d3, d4 := tk.d0, tk.d1, tk.d2, tk.d3, tk.d4
-	i0, i1, i2, i3, i4 := tk.i0, tk.i1, tk.i2, tk.i3, tk.i4
+	l0, l1, l2, l3, l4 := tk.lab0, tk.lab1, tk.lab2, tk.lab3, tk.lab4
+
 	qPtr := &query[0]
+	var distBuf [8]int64
 
-	for _, ci := range probed {
+	for _, ci := range sorted {
+		if cellLBs[ci] >= d4 {
+			break
+		}
 		c := &pg.Clusters[ci]
-		start := int(c.Start)
-		end := start + int(c.Count)
-		for i := start; i < end; i++ {
-			dist := sqdistAVX2(qPtr, &vectors[i*stride])
-			if dist >= d4 {
-				continue
+		blockOff := c.BlockStart
+		labelOff := c.LabelStart
+		count := c.Count
+		nb := c.NumBlocks
+		for b := uint32(0); b < nb; b++ {
+			blockScan8AVX2(qPtr, &blocks[blockOff+b*dataset.BlockInt16], &distBuf)
+			base := labelOff + b*dataset.BlockVectors
+			lim := uint32(dataset.BlockVectors)
+			realInBlock := count - b*dataset.BlockVectors
+			if realInBlock < lim {
+				lim = realInBlock
 			}
-			switch {
-			case dist < d0:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = d1, i1
-				d1, i1 = d0, i0
-				d0, i0 = dist, i
-			case dist < d1:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = d1, i1
-				d1, i1 = dist, i
-			case dist < d2:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = dist, i
-			case dist < d3:
-				d4, i4 = d3, i3
-				d3, i3 = dist, i
-			default:
-				d4, i4 = dist, i
+			for v := uint32(0); v < lim; v++ {
+				dist := distBuf[v]
+				if dist >= d4 {
+					continue
+				}
+				lab := blockLabels[base+v]
+				switch {
+				case dist < d0:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = d1, l1
+					d1, l1 = d0, l0
+					d0, l0 = dist, lab
+				case dist < d1:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = d1, l1
+					d1, l1 = dist, lab
+				case dist < d2:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = dist, lab
+				case dist < d3:
+					d4, l4 = d3, l3
+					d3, l3 = dist, lab
+				default:
+					d4, l4 = dist, lab
+				}
 			}
 		}
 	}
 
 	tk.d0, tk.d1, tk.d2, tk.d3, tk.d4 = d0, d1, d2, d3, d4
-	tk.i0, tk.i1, tk.i2, tk.i3, tk.i4 = i0, i1, i2, i3, i4
+	tk.lab0, tk.lab1, tk.lab2, tk.lab3, tk.lab4 = l0, l1, l2, l3, l4
 }
 
-func scanProbedScalar(query *[stride]int16, vectors []int16, probed []int, pg *dataset.IVFPartition, isSentinel5, isSentinel6 bool, tk *topK) {
-	q0 := int32(query[0])
-	q1 := int32(query[1])
-	q2 := int32(query[2])
-	q3 := int32(query[3])
-	q4 := int32(query[4])
-	q5 := int32(query[5])
-	q6 := int32(query[6])
-	q7 := int32(query[7])
-	q8 := int32(query[8])
-	q12 := int32(query[12])
-	q13 := int32(query[13])
-
+func scanIVFScalar(query *[stride]int16, blocks []int16, blockLabels []uint8, sorted []int, cellLBs []int64, pg *dataset.IVFPartition, tk *topK) {
 	d0, d1, d2, d3, d4 := tk.d0, tk.d1, tk.d2, tk.d3, tk.d4
-	i0, i1, i2, i3, i4 := tk.i0, tk.i1, tk.i2, tk.i3, tk.i4
+	l0, l1, l2, l3, l4 := tk.lab0, tk.lab1, tk.lab2, tk.lab3, tk.lab4
 
-	for _, ci := range probed {
+	for _, ci := range sorted {
+		if cellLBs[ci] >= d4 {
+			break
+		}
 		c := &pg.Clusters[ci]
-		start := int(c.Start)
-		end := start + int(c.Count)
-		for i := start; i < end; i++ {
-			base := i * stride
-			t := q0 - int32(vectors[base])
-			dist := int64(t) * int64(t)
-			if dist >= d4 {
-				continue
+		blockOff := c.BlockStart
+		labelOff := c.LabelStart
+		count := c.Count
+		nb := c.NumBlocks
+		for b := uint32(0); b < nb; b++ {
+			base := blockOff + b*dataset.BlockInt16
+			labBase := labelOff + b*dataset.BlockVectors
+			lim := uint32(dataset.BlockVectors)
+			realInBlock := count - b*dataset.BlockVectors
+			if realInBlock < lim {
+				lim = realInBlock
 			}
-			t = q1 - int32(vectors[base+1])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q2 - int32(vectors[base+2])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q3 - int32(vectors[base+3])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q4 - int32(vectors[base+4])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			if !isSentinel5 {
-				t = q5 - int32(vectors[base+5])
-				dist += int64(t) * int64(t)
-				if dist >= d4 {
+			for v := uint32(0); v < lim; v++ {
+				var sum int64
+				for d := 0; d < stride; d++ {
+					t := int64(query[d]) - int64(blocks[base+uint32(d)*dataset.BlockVectors+v])
+					sum += t * t
+				}
+				if sum >= d4 {
 					continue
 				}
-			}
-			if !isSentinel6 {
-				t = q6 - int32(vectors[base+6])
-				dist += int64(t) * int64(t)
-				if dist >= d4 {
-					continue
+				lab := blockLabels[labBase+v]
+				switch {
+				case sum < d0:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = d1, l1
+					d1, l1 = d0, l0
+					d0, l0 = sum, lab
+				case sum < d1:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = d1, l1
+					d1, l1 = sum, lab
+				case sum < d2:
+					d4, l4 = d3, l3
+					d3, l3 = d2, l2
+					d2, l2 = sum, lab
+				case sum < d3:
+					d4, l4 = d3, l3
+					d3, l3 = sum, lab
+				default:
+					d4, l4 = sum, lab
 				}
-			}
-			t = q7 - int32(vectors[base+7])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q8 - int32(vectors[base+8])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q12 - int32(vectors[base+12])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			t = q13 - int32(vectors[base+13])
-			dist += int64(t) * int64(t)
-			if dist >= d4 {
-				continue
-			}
-			switch {
-			case dist < d0:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = d1, i1
-				d1, i1 = d0, i0
-				d0, i0 = dist, i
-			case dist < d1:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = d1, i1
-				d1, i1 = dist, i
-			case dist < d2:
-				d4, i4 = d3, i3
-				d3, i3 = d2, i2
-				d2, i2 = dist, i
-			case dist < d3:
-				d4, i4 = d3, i3
-				d3, i3 = dist, i
-			default:
-				d4, i4 = dist, i
 			}
 		}
 	}
 
 	tk.d0, tk.d1, tk.d2, tk.d3, tk.d4 = d0, d1, d2, d3, d4
-	tk.i0, tk.i1, tk.i2, tk.i3, tk.i4 = i0, i1, i2, i3, i4
-}
-
-// sqdistFallback is the non-AVX2 squared distance over a stride-int16 pair.
-// Used only on non-amd64 builds for centroid distance.
-func sqdistFallback(query, c *[stride]int16) int64 {
-	var d int64
-	for i := 0; i < stride; i++ {
-		t := int64(query[i]) - int64(c[i])
-		d += t * t
-	}
-	return d
+	tk.lab0, tk.lab1, tk.lab2, tk.lab3, tk.lab4 = l0, l1, l2, l3, l4
 }

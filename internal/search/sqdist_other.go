@@ -11,3 +11,6 @@ var useAVX2 = false
 func UseAVX2() bool { return useAVX2 }
 
 func sqdistAVX2(query, ref *int16) int64 { panic("sqdistAVX2 called on non-amd64") }
+func blockScan8AVX2(query, block *int16, out *[8]int64) {
+	panic("blockScan8AVX2 called on non-amd64")
+}
