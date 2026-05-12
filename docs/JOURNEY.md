@@ -14,7 +14,9 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 3 | Pre-built IVF index baked into image | 3223 | 218ms | Same accuracy, but startup is now fast — pre-built tool runs at Docker build time, persists to /resources/index.bin |
 | 4 | Exact IVF (LB pruning) + block-SIMD (BlockScan8) | **3410** | 200ms | Per-vector SIMD → per-block 8-wide SIMD (8 vectors at once, dim-major layout, AVX2 VPSUBW + VPMULLD + VPADDQ). Local Rosetta hit p99 15ms — proves the kernel works |
 | 5 | + ulimits + seccomp:unconfined | (test pending) | — | Compose-only change, no code |
-| 6 | Custom HTTP server (drop net/http) | TBD | TBD | The big win we were missing — top Go submissions write the response bytes directly to the socket, no http.Request alloc |
+| 6 | Custom HTTP server (drop net/http) | 3452 | 232ms | No meaningful change on Mac Mini. The HTTP layer wasn't the bottleneck. |
+| 7 | Flat IVF K=4096 with Lloyd k-means (rewrite) | local: 2888 | local 456ms | **Regression.** Lloyd k-means produces unbalanced clusters with meaningless centroids on discrete dims (online/card/unknown sit at intermediate 16000 values). 65 FP + 61 FN crossing threshold on local. |
+| 8 | Flat IVF K=8192 with balancedSplit + ambiguity expansion | TBD | TBD | Replaced Lloyd with josehenrique-dev-Go's recursive median-split on max-variance dim. Exactly balanced clusters. nprobe=32 fast + nprobe=128 on borderline. Local FP=4 FN=8. |
 
 ## What I learned
 
@@ -87,11 +89,35 @@ Fix: switch dataset storage to float32. Cost: 168 MB for 3M × 14 × 4 bytes —
 6. Break when cluster LB ≥ current top-5's worst distance
 7. Return pre-built response bytes by fraud-count index
 
-## What's next
+## What we learned (running tally)
 
-1. **Custom HTTP server**: drop net/http entirely, port josehenrique-dev-Go's pattern. Biggest p99 win remaining.
-2. **Float32 storage**: eliminates the 1 FN, ~doubles kernel throughput via VFMADD231PS. Tight on memory.
-3. **Smaller cluster sizes (K=256+)**: less work per query but slower image build.
-4. **Tighter LB pruning + bbox per block** (not just per cluster): cut more vectors from scan.
+### The bottleneck isn't where you think
 
-The fundamental insight from this journey: **the top of the leaderboard is achieved by eliminating Go-runtime overhead, not by inventing exotic algorithms**. HNSW (rank 3) and grid+SIMD (rank 23) cluster within 5× of each other; the rest is HTTP serving, memory layout, and reducing per-request allocations.
+We assumed for many phases that the HTTP layer was the gap to top Go submissions. Custom raw HTTP gave us **+0** on Mac Mini. The actual gap was algorithmic — partitioned K=128 IVF (4096 clusters with LB pruning, exact KNN) scans ~5,000 vectors per query and runs at 200 µs CPU. Top Go's flat K=8192 balancedSplit (366 vectors per cluster, approximate via nprobe=8) scans 2,900 vectors at 80 µs CPU. The 2.5× CPU reduction matters more than HTTP layer micro-optimizations.
+
+### k-means is the wrong tool for mixed continuous/discrete data
+
+The Rinha vector layout has 14 dims, of which 5 are effectively binary (is_online, card_present, unknown_merchant, sentinel bits) — values are either 0 or 32000 (or -32000 for sentinels). Lloyd k-means produces centroids at the MEAN of cluster members, which for a 50/50 binary split lands at 16000 — a value no real vector has. Searching by "nearest centroid" then bunches together vectors that don't actually share the binary characteristic. The result: 65 FP + 61 FN at K=4096 nprobe=8.
+
+**Balanced KD-split** (recursive median-split on max-variance dim) sidesteps this by partitioning on discrete dims FIRST (they have max variance early in the recursion). Each leaf cluster is homogeneous on those bits, like our original 32-partition prefilter was — but without hardcoding which dims to split on.
+
+### Mac Mini variance is real and not your code's fault
+
+Identical images gave us p99 140ms → 387ms → 494ms across three runs of the original grid + net/http build. 3.5× variance with the same code. The Mac Mini runs k6 ON THE SAME HARDWARE as the SUT containers; depending on how the OS schedules them, k6 can grab CPU at the wrong moment and queue our requests. Below a certain server speed (~5 ms p99) you stop being CPU-bound and start being scheduler-bound, and there's nothing in our code that fixes that.
+
+### `pull_policy: always` saved the submission
+
+The single most impactful change of the session was a YAML one-liner. Without it, the rinha bot's Docker daemon cached our first (broken, no-dataset) image and never re-pulled — every subsequent test ran the same stale binary regardless of how many times we pushed `:latest`. The fix went from -2640 to +3566.
+
+### `ulimits` + `seccomp:unconfined` eliminated tail-latency HTTP errors
+
+Without these, ~1-3 requests per test would time out at 2001 ms during the k6 ramp. The fix in compose alone took detection score from 2713 → 2819 (+106 points).
+
+## What's next (open questions)
+
+1. **Float32 storage**: eliminates the 1 quantization FN, plus ~doubles kernel throughput via VFMADD231PS. Memory cost is 168 MB — just over our 167 MB cgroup. Doable if we eliminate other overhead.
+2. **PGO with a real profile from the rinha bot**: probably 5-15% across the board. Need to figure out how to capture profiles from the bot.
+3. **Pre-sort cluster vectors by some discriminating dim** so early-exit kicks in faster.
+4. **Variance-ordered dim layout in the asm kernel** (top-Go does this — STEP(10), STEP(12), STEP(4) rather than STEP(0..15) in order — to make partial sums exceed the threshold faster).
+
+The fundamental insight from this journey: **the top of the leaderboard is achieved by getting many small things right, not by one heroic optimization**. The compose-level tweaks (pull_policy, ulimits, seccomp) gained us ~150 points. The algorithm change (k-means → balancedSplit) gained us ~300 expected points. The block-major SIMD kernel was a wash on the Mac Mini despite being 8× wider locally. Top Go submissions clustering between 5500-5900 final are doing **all** of these well, not picking one.
