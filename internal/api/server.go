@@ -120,7 +120,7 @@ func (h *Handler) fraudScoreRaw(body []byte) []byte {
 	if !vector.VectorizeFast(body, &query) {
 		return rawhttpResponses[0]
 	}
-	frauds := search.FraudCountIVF(&query, ds)
+	frauds := search.FraudCount(&query, ds)
 	return rawhttpResponses[frauds]
 }
 
@@ -133,8 +133,7 @@ func (h *Handler) debugInfoRaw() []byte {
 		count = ds.Count
 	}
 	body := fmt.Sprintf(
-		`{"useAVX2":%t,"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
-		search.UseAVX2(),
+		`{"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
 		count,
 		h.ready.Load(),
 		m.HeapInuse/(1<<20),
@@ -159,8 +158,7 @@ func (h *Handler) handleDebugInfo(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w,
-		`{"useAVX2":%t,"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
-		search.UseAVX2(),
+		`{"dataset_count":%d,"ready":%t,"heap_inuse_mb":%d,"alloc_total_mb":%d,"goarch":"%s","goos":"%s","gomaxprocs":%d}`,
 		count,
 		h.ready.Load(),
 		m.HeapInuse/(1<<20),
@@ -220,7 +218,7 @@ func (h *Handler) handleFraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	frauds := search.FraudCountIVF(&query, ds)
+	frauds := search.FraudCount(&query, ds)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(fraudResponses[frauds])
 }
