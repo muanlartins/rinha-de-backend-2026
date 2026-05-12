@@ -22,6 +22,7 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 11 | int8 quantization | local: regression, NOT pushed | n/a | Tried per-dim linear int8 (scale 127, sentinel -127). `TestGridFullDataset` showed **FP=51, FN=62** — projected −1080 detection points. Local-bench latency win only 10 %. Net negative in every Haswell scenario. Reverted. Detailed in lecture 06. |
 | 12 | float32 with mmap-shared-tmpfs | local: regression, NOT pushed | n/a | Tried float32 storage to eliminate the 1 FN. Empirically **the 1 FN survives float32** — it's not a quantization artifact, it's a structural mismatch between our search and rinha's label generator (probably parser-related, on test-data.json entry 5472). Plus latency regressed 18 % locally (cache pressure from 84 → 168 MB). Reverted. Built `LoadIndexMmap` + cgroup-friendly shared-tmpfs design for archive purposes — usable if some future change wants the memory headroom. Detailed in lecture 06. |
 | 13 | Load shedder (`SHED_SLOTS=4`, `SHED_TIMEOUT_MS=3`) | Mac Mini: **3823** | Mac Mini 99.25ms | Net **+110** over phase 10 via issue [#3768](https://github.com/zanfranceschi/rinha-de-backend-2026/issues/3768), but not where expected. p99 was essentially unchanged (99 vs 100 ms) — shedder rarely fired. Win came from **eliminating the 1 Err** phase 10 picked up (Err weight 5 vs FN weight 3 → −106 detection penalty saved). Detection now saturated at **2819/3000 = max modulo the 1 structural FN**. p99_score still 1003/3000, all remaining headroom there. |
+| 14 (planning) | Top-10 survey — 6 parallel agents reviewed all top-10 repos (C++/Rust/C/Zig/Go/.NET) | — | — | The 10 top submissions converge on **one architecture**: k-means IVF (K=512-4096) + int16×10000 quantization + 8-vector dim-major SIMD blocks + AABB-LB pruning + 3-stage early-exit at dims 4/6/8 + two-tier nprobe with borderline-only escalation + UDS hand-rolled server + hand-rolled positional parser + 6 pre-rendered responses + **SCM_RIGHTS fd-passing LB** (top 4 only). Our grid framework is the gap. Detailed in lecture 08. |
 
 ## What I learned
 
@@ -133,14 +134,38 @@ Things we've **already eliminated** (don't retry without new evidence):
 - **int8 quantization** (lecture 06). Linear per-dim int8 → FP=51/FN=62 on full test set. Adaptive per-dim normalization changes geometry, deviates from labels. Spherical k-means is a centroid-only trick that doesn't fix per-vector noise. **Won't be a win in our exact-grid pipeline.**
 - **float32 storage** (lecture 06). The 1 structural FN is not a quantization artifact; float32 doesn't eliminate it. Doubled cache pressure also makes latency 18 % worse locally.
 
-Things still **on the table**:
+Things still **on the table** (updated post phase-13 + top-10 survey, lecture 08):
 
-1. **Load shedder tuning sweep** (lecture 07). After phase 13's first result, sweep `SHED_SLOTS` ∈ {1, 2, 4, 8} and `SHED_TIMEOUT_MS` ∈ {1, 3, 5} from the compose to find the operating point with the best score. No code changes required.
-2. **shed-as-deny** instead of shed-as-approve. Expected weighted-E per shed is 0.56 (vs 1.32 for approve). One-line change if shed-as-approve doesn't carry its weight.
-3. **Find and fix the 1 structural FN.** It's not quantization (confirmed in phase 12). Likely the parser produces a different float64 for one specific timestamp/amount combo on test-data.json entry 5472. Bisect: dump our parsed query vs `vectorizeSlow`'s output for that entry. If they differ, fix the fast parser. Free +106 detection points.
-4. **SIMD asm distance kernel.** Phases 4-6 retired this. The early-exit kernel doesn't compose with 8-wide block ops cleanly, but a **VPDPBSSD** (AVX-VNNI) or **AVX-512** kernel can mask early-exit per lane — Mac Mini Haswell has neither, so this is a dead end without a hardware upgrade. Marking as "won't fit Mac Mini."
-5. **Look at top contestants once more.** The journey doc references `josehenrique-dev-Go (#23, p99 1.76ms)` — we haven't surveyed his full repo. A focused dive into how he gets sub-2ms with similar memory budget could surface a structural trick we're missing (a different data layout, a faster JSON parser, kernel work).
-6. **Profile the Mac Mini run.** Capture `pprof` from inside the container during a real bench run on the bot. We've been profile-blind since we can't replicate Mac Mini contention locally.
+The top-10 survey changes the priority list entirely. **The grid framework is the gap.** All 10 top submissions use k-means IVF with 8-vector dim-major SIMD blocks and per-cluster AABB-LB pruning. Score-wise:
+
+- Top 10: 5853–5983 (p99 1.04–1.40 ms)
+- Us: 3823 (p99 99.25 ms)
+- Two of the top 10 are Go (rank #6 steixeira93, rank #9 joycegodinho) with the same compiler and hardware — so the gap is architectural, not language.
+
+Recommended roadmap (lecture 08 has the full version):
+
+**Tier 1 (3-7 days, expected score ~5400-5700, p99 5-15ms):**
+1. **Replace grid with k-means IVF** (K=4096, Lloyd's algo, k-means++ init, built at Docker build time). Drop the 32-partition + 1024-cell grid entirely.
+2. **8-vector dim-major block layout per cluster** (`block[d*8 + lane]` int16, padded to multiple of 8 with INT16_MAX sentinels).
+3. **AVX2 distance kernel in Plan 9 assembly** (`scan_blocks_amd64.s`) — int16→f32 widen, broadcast query dim, sub, fmadd, 3-stage early-exit at dims 4/6/8 via `VCMPPS + VMOVMSKPS`. Generic Go fallback in `_generic.go`.
+4. **AABB-LB pruning per cluster** (we already have the algorithm, just apply it over k-means cells instead of grid cells).
+5. **Two-tier nprobe**: fast=8, full=24, escalate only on `fraud_count ∈ {2,3}`.
+
+**Tier 2 (1-2 days, expected score ~5800-5900, p99 1.5-3ms):**
+6. **SCM_RIGHTS fd-passing LB.** Replace HAProxy with `jrblatt/so-no-forevis:v1.0.0` (public image, no LB code needed); implement `recvmsg(SCM_RIGHTS)` in our Go server (~100 LOC using `golang.org/x/sys/unix.Recvmsg` and `unix.ParseSocketControlMessage`). Alternative: `ghcr.io/steixeira93/rinha-lb:preview-v20` (splice(2) zero-copy proxy, drop-in compatible).
+
+**Tier 3 (2-5 days, expected score 5900-5970, p99 1.1-1.5ms):**
+7. **Index mmap with MADV_RANDOM + MADV_POPULATE_READ + MADV_HUGEPAGE.** Drops Go heap pressure; shared inode → both replicas share kernel page cache.
+8. **In-process warmup loop** (500 random fraud-score iterations before opening the listener).
+9. **Pin the index across Docker builds** (COPY `/index` from previous tagged image — k-means is non-deterministic under QEMU, kills score variance).
+10. **Compose tweaks**: identical `image:` URI on api1+api2 for shared page cache; `seccomp:unconfined`; `ulimits.nofile: 65535`; `logging: driver: none`.
+
+**Tier 4 (post-5970):** hand-tuned "extreme repair" zones (Repo #1's trick), `writev`-based HTTP pipelining batching, CPU pinning.
+
+Background still open (not blocking, but mentioned in earlier phases):
+
+- **Find and fix the 1 structural FN** (test-data.json entry 5472). Worth +106 detection points if it's a parser bug. Becomes trivial to investigate once the k-means IVF replaces the grid — the FN may not survive the algorithm change at all.
+- **Load shedder tuning sweep** (lecture 07). With Tier 1+2 done, the shedder's role shrinks toward zero. Keep `SHED_TIMEOUT_MS=3` as a safety belt for now.
 
 What we should **not** do without more data:
 
