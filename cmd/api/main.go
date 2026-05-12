@@ -14,7 +14,7 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 )
 
-const referencesPath = "/resources/references.json.gz"
+const indexPath = "/resources/index.bin"
 
 func main() {
 	// runtime.NumCPU reports host CPUs, not the cgroup share — pin to the
@@ -56,25 +56,17 @@ func main() {
 		}
 	}()
 
-	if _, err := os.Stat(referencesPath); errors.Is(err, os.ErrNotExist) {
-		log.Printf("WARN: %s not found; coming up in stub mode", referencesPath)
+	if _, err := os.Stat(indexPath); errors.Is(err, os.ErrNotExist) {
+		log.Printf("WARN: %s not found; coming up in stub mode", indexPath)
 		handler.MarkReady()
 	} else {
-		log.Printf("loading dataset from %s ...", referencesPath)
+		log.Printf("loading pre-built index from %s ...", indexPath)
 		t0 := time.Now()
-		ds, err := dataset.LoadFromGzipJSON(referencesPath)
+		ds, err := dataset.LoadIndex(indexPath)
 		if err != nil {
-			log.Fatalf("load dataset: %v", err)
+			log.Fatalf("load index: %v", err)
 		}
-		log.Printf("dataset loaded: %d vectors in %s", ds.Count, time.Since(t0))
-
-		t1 := time.Now()
-		ds.Partition()
-		log.Printf("dataset partitioned in %s", time.Since(t1))
-
-		t2 := time.Now()
-		ds.BuildIVF()
-		log.Printf("ivf built in %s", time.Since(t2))
+		log.Printf("index loaded: %d vectors in %s", ds.Count, time.Since(t0))
 
 		runtime.GC()
 		handler.SetDataset(ds)
