@@ -21,7 +21,10 @@ func ScanBlock8Generic(q *float32, block *int16, worst float32, sum *[8]float32)
 		sum[lane] = 0
 	}
 
-	checkpoints := [3]int{4, 6, 8}
+	// Cadence 8 (single gate) — phase 24 alignment with the amd64 asm,
+	// which removed the dim-4 and dim-6 checkpoints. Keeps the generic
+	// path as a faithful oracle.
+	checkpoints := [1]int{8}
 	cpIdx := 0
 
 	for d := 0; d < dims; d++ {

@@ -68,13 +68,10 @@ TEXT ·ScanBlock8AVX2(SB), NOSPLIT, $0-40
 	VSUBPS       Y1, Y2, Y2
 	VFMADD231PS  Y2, Y2, Y0
 
-	// --- Checkpoint 1: 4 dims accumulated ------------------------------
-	VCMPPS    $0x01, Y15, Y0, Y3
-	VMOVMSKPS Y3, R8
-	TESTL     R8, R8
-	JZ        dead
-
-	// --- Dims 4..5 -----------------------------------------------------
+	// --- Dims 4..7 (no intermediate checkpoint, phase 24 cadence change ----
+	// 4/6/8 → 8/14, jairoblatt-rust pattern). With <8 dims accumulated
+	// the partial-sum signal is too noisy to reliably prune; the early
+	// gates cost 4-5 cycles each but rarely save more than they cost.
 	VPMOVSXWD    64(BX), Y1
 	VCVTDQ2PS    Y1, Y1
 	VBROADCASTSS 16(AX), Y2
@@ -87,13 +84,6 @@ TEXT ·ScanBlock8AVX2(SB), NOSPLIT, $0-40
 	VSUBPS       Y1, Y2, Y2
 	VFMADD231PS  Y2, Y2, Y0
 
-	// --- Checkpoint 2: 6 dims accumulated ------------------------------
-	VCMPPS    $0x01, Y15, Y0, Y3
-	VMOVMSKPS Y3, R8
-	TESTL     R8, R8
-	JZ        dead
-
-	// --- Dims 6..7 -----------------------------------------------------
 	VPMOVSXWD    96(BX), Y1
 	VCVTDQ2PS    Y1, Y1
 	VBROADCASTSS 24(AX), Y2
@@ -106,7 +96,7 @@ TEXT ·ScanBlock8AVX2(SB), NOSPLIT, $0-40
 	VSUBPS       Y1, Y2, Y2
 	VFMADD231PS  Y2, Y2, Y0
 
-	// --- Checkpoint 3: 8 dims accumulated ------------------------------
+	// --- Checkpoint at 8 dims accumulated (first gate) -----------------
 	VCMPPS    $0x01, Y15, Y0, Y3
 	VMOVMSKPS Y3, R8
 	TESTL     R8, R8
