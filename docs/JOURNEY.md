@@ -33,6 +33,7 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 17d | FastNProbe 32 → 16 | **4175** | 44ms | Issue #3912. Detection unchanged; p99 within noise. |
 | 18 (try 1) | SCM_RIGHTS LB — SEQPACKET listener | **health-fail** | n/a | Issue #3919. Connection reset — `so-no-forevis` connects to .ctrl as SOCK_STREAM. |
 | 18 (fixed) | fdpass listener as SOCK_STREAM | **5449** | **2.35ms** | Issue #3931. The LB never reads request/response bytes — it accept()s on :9999 and sendmsg-passes the client fd over .ctrl SOCK_STREAM to the APIs. p99 41ms → 2.35ms; +1244 over phase 17d, **+1626 over phase-13 baseline**. p99_score 2629/3000. |
+| 19 | mmap + MADV_RANDOM/POPULATE_READ/HUGEPAGE + 500-iter warmup | **5446** | 2.36ms | Issue #3945. Statistical tie with phase 18 — the api was never memory-pressured at 84MB heap inside 167MB cgroup, so the page-cache sharing didn't matter. Warmup cleanly primes the CPU caches but the first request would have warmed them anyway by t≈ms. mmap loads the index in 2ms (vs 80ms read-into-heap) which trims startup time only. **Plateau reached.** All future gains require per-request compute reductions (per-cluster radius, smaller K, asm-level centroid pass) — diminishing returns territory. |
 
 ## What I learned
 
