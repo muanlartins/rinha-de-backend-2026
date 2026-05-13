@@ -167,12 +167,8 @@ func TestIVFFullVsBrute(t *testing.T) {
 	scanned := len(top.Entries) / step
 	t.Logf("step=%d mismatches: %d / %d (%.4f%%)",
 		step, mismatch, scanned, 100*float64(mismatch)/float64(scanned))
-	// Up to 2 mismatches are tolerated for the NPROBE=12 fast tier — they
-	// land on entries where the oracle's raw-float ranking disagrees with
-	// the int16 brute ranking (TestIVFFullDataset is the authoritative
-	// scoring check; FN/FP are validated there). Hard fail above that.
-	if mismatch > 2 {
-		t.Errorf("expected ≤2 mismatches vs int16 brute; got %d", mismatch)
+	if mismatch > 0 {
+		t.Errorf("expected exact match vs int16 brute; got %d mismatches", mismatch)
 	}
 }
 

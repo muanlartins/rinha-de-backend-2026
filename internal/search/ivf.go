@@ -13,15 +13,11 @@ import (
 // borderline-only escalation (count ∈ {2,3}) the fast tier handles ~85%
 // of queries, so keeping it tight is the lever for p99.
 //
-// FastNProbe = 12 (phase 23) is a tighter fast tier than the original 16
-// without the recall risk of 8. Local TestIVFFullVsBrute shows 1 mismatch
-// vs int16 brute (entry 25640: ivf=1 brute=3) but TestIVFFullDataset is
-// unchanged at FN=1 FP=0 — the brute mismatch lands on an entry where
-// the oracle agrees with IVF's count, not brute's. The structural FN=1
-// on entry 5472 is unfixable without higher reference precision (top-5
-// boundary gap is 0.007% relative in i64; int16×32000 quantization is
-// at the limit of resolution).
-const FastNProbe = 12
+// FastNProbe stayed at 16 after phase 23 (NPROBE=12) regressed on the
+// bot test set with FN=2 — local FN=1 on darwin/arm64 generic kernel did
+// not predict linux/amd64 AVX2-kernel behaviour at the borderline. NPROBE
+// changes are off-limits without amd64 validation infrastructure.
+const FastNProbe = 16
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
 // from a sync.Pool — every field is touched on the hot path.
