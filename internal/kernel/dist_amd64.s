@@ -32,6 +32,15 @@ TEXT ·ScanBlock8AVX2(SB), NOSPLIT, $0-40
 	VBROADCASTSS worst+16(FP), Y15
 	MOVQ         sum+24(FP), CX
 
+	// HW prefetch the next block (offset +224) so it lands in L1d while
+	// this iteration's FMAs are in flight. Three lines cover the 192
+	// bytes that aren't already hot from the current block's tail line
+	// [192..256). PREFETCHT0 is a hint — safe on invalid addresses at
+	// end-of-cluster / end-of-mmap. See top-3 review (jairoblatt+joojf).
+	PREFETCHT0 256(BX)
+	PREFETCHT0 320(BX)
+	PREFETCHT0 384(BX)
+
 	VXORPS Y0, Y0, Y0
 
 	// --- Dims 0..3 -----------------------------------------------------
