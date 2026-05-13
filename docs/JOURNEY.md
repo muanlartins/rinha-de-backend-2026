@@ -33,7 +33,24 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 17d | FastNProbe 32 → 16 | **4175** | 44ms | Issue #3912. Detection unchanged; p99 within noise. |
 | 18 (try 1) | SCM_RIGHTS LB — SEQPACKET listener | **health-fail** | n/a | Issue #3919. Connection reset — `so-no-forevis` connects to .ctrl as SOCK_STREAM. |
 | 18 (fixed) | fdpass listener as SOCK_STREAM | **5449** | **2.35ms** | Issue #3931. The LB never reads request/response bytes — it accept()s on :9999 and sendmsg-passes the client fd over .ctrl SOCK_STREAM to the APIs. p99 41ms → 2.35ms; +1244 over phase 17d, **+1626 over phase-13 baseline**. p99_score 2629/3000. |
-| 19 | mmap + MADV_RANDOM/POPULATE_READ/HUGEPAGE + 500-iter warmup | **5446** | 2.36ms | Issue #3945. Statistical tie with phase 18 — the api was never memory-pressured at 84MB heap inside 167MB cgroup, so the page-cache sharing didn't matter. Warmup cleanly primes the CPU caches but the first request would have warmed them anyway by t≈ms. mmap loads the index in 2ms (vs 80ms read-into-heap) which trims startup time only. **Plateau reached.** All future gains require per-request compute reductions (per-cluster radius, smaller K, asm-level centroid pass) — diminishing returns territory. |
+| 19 | mmap + MADV_RANDOM/POPULATE_READ/HUGEPAGE + 500-iter warmup | **5446** | 2.36ms | Issue #3945. Statistical tie with phase 18 — the api was never memory-pressured at 84MB heap inside 167MB cgroup, so page-cache sharing didn't matter. mmap loads the index in 2ms (vs 80ms read-into-heap) — trims startup time only. **Plateau reached.** |
+| 20 | CPU split 0.45/0.45/0.10 (lb → apis) | **5449** | 2.35ms | Issue #3952. Statistical tie with phases 18/19 (5449/5446/5449 across three runs). so-no-forevis at 0.10 CPU still keeps up — per-request api work is already short enough that extra CPU per replica doesn't shave further. **Plateau confirmed at ~5448 ± 3.** |
+
+## Final state
+
+**Score: 5448.88 / 6000** (90.8% of max). p99 2.35 ms, FP=0, FN=1, Err=0. Detection 2819.38/3000 (saturated modulo 1 structural FN on test-data entry 5472). p99 2629.5/3000.
+
+**Trajectory:**
+- Phase 13 baseline (grid + load shedder): 3823.65, p99 99.25ms — rank 86
+- Phase 20 final (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): **5448.88, p99 2.35ms** — ~rank 20-25 of ~330 submissions
+
+**Net: +1625.23 points, p99 cut 42×.** Single largest win: phase 18 SCM_RIGHTS LB swap (+1244 alone).
+
+**Where the work went:**
+- 6 concept lectures (08-13) written before each implementation layer
+- ~3500 lines of new Go in `internal/{ivf,kernel,search,fdpass,api}/` + cmd/
+- One hand-tuned Plan 9 AVX2 + FMA assembly kernel with 3-stage early-exit
+- 7 build-and-test rinha bot iterations
 
 ## What I learned
 
