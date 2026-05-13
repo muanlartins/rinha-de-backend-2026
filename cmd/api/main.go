@@ -13,7 +13,10 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 )
 
-const indexPath = "/resources/index.bin"
+const (
+	indexPath   = "/resources/index.bin"
+	warmupIters = 500
+)
 
 func main() {
 	runtime.GOMAXPROCS(1)
@@ -52,22 +55,25 @@ func main() {
 		log.Printf("WARN: %s not found; coming up in stub mode", indexPath)
 		handler.MarkReady()
 	} else {
-		log.Printf("loading IVF index from %s ...", indexPath)
+		log.Printf("mmap'ing IVF index from %s ...", indexPath)
 		t0 := time.Now()
-		f, err := os.Open(indexPath)
+		idx, err := ivf.LoadMmap(indexPath)
 		if err != nil {
-			log.Fatalf("open index: %v", err)
+			log.Fatalf("mmap index: %v", err)
 		}
-		idx, err := ivf.Load(f)
-		f.Close()
-		if err != nil {
-			log.Fatalf("load index: %v", err)
-		}
-		log.Printf("index loaded: N=%d K=%d blocks=%d in %s",
+		log.Printf("index mmapped: N=%d K=%d blocks=%d in %s",
 			idx.N, idx.K, idx.Blocks, time.Since(t0))
+
+		// In-process warmup before the handler accepts requests. Warms
+		// CPU caches and branch predictor with hot search code paths so
+		// the first real requests don't pay cold-cache penalty.
+		t1 := time.Now()
+		d := api.Warmup(idx, warmupIters)
+		log.Printf("warmup: %d iters in %s (avg %s)", warmupIters, d, d/time.Duration(warmupIters))
 
 		runtime.GC()
 		handler.SetIndex(idx)
+		log.Printf("ready in %s (total since startup: %s)", time.Since(t1), time.Since(t0))
 	}
 
 	select {}
