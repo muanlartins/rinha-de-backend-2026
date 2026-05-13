@@ -1,6 +1,8 @@
 package search
 
 import (
+	"math"
+
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/kernel"
@@ -101,12 +103,28 @@ func FraudCountIVF(
 
 
 func scanCluster(c uint16, qf *[dataset.Dims]float32, qi *[dataset.Dims]int16, idx *ivf.IVFIndex, scratch *IVFScratch) {
+	worstF32 := scratch.Top.WorstF32()
+
+	// Triangle-inequality LB. For any member x of cluster c,
+	//   dist(q, x) >= max(0, sqrt(centroidDistSq[c]) - radius[c])
+	// so the squared lower bound is gap². Cheap scalar (single sqrt) and
+	// strictly tighter than AABB on round clusters. Worst-case 4096 sqrts
+	// across the borderline sweep ≈ 20 µs on Haswell. See lecture 11.
+	cd := scratch.CentroidDists[int(c)]
+	if cd > 0 {
+		cdSqrt := float32(math.Sqrt(float64(cd)))
+		gap := cdSqrt - idx.Radii[c]
+		if gap > 0 && gap*gap >= worstF32 {
+			return
+		}
+	}
+
 	// AABB-LB filter. Operate in f32 + safety margin so f32 rounding
 	// can't prune a cluster whose i64 distance to q is within margin.
 	bmin := (*[16]int16)(idx.BboxMin[int(c)*16:][:16:16])
 	bmax := (*[16]int16)(idx.BboxMax[int(c)*16:][:16:16])
 	lb := AABBLowerBoundF32(qf, bmin, bmax)
-	if lb >= scratch.Top.WorstF32() {
+	if lb >= worstF32 {
 		return
 	}
 

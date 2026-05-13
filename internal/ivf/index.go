@@ -34,6 +34,12 @@ type IVFIndex struct {
 	BboxMin []int16
 	BboxMax []int16
 
+	// Per-cluster radius: max f32 euclidean distance from each centroid to
+	// any of its members. Computed at load time (ComputeRadii), not
+	// serialized. Used by scanCluster for the triangle-inequality LB,
+	// strictly tighter than AABB-LB on round clusters. Length K.
+	Radii []float32
+
 	// Per-block-lane fraud label. Length Blocks*8. Phantom lanes are zero.
 	Labels []uint8
 
@@ -184,6 +190,7 @@ func Build(vectors []int16, count int, centroids *[K][dataset.Dims]float32, assi
 		}
 	}
 
+	ComputeRadii(idx)
 	return idx, nil
 }
 
@@ -320,6 +327,7 @@ func Load(r io.Reader) (*IVFIndex, error) {
 	if err := readInt16Slice(r, idx.BlockData); err != nil {
 		return nil, fmt.Errorf("read blocks: %w", err)
 	}
+	ComputeRadii(idx)
 	return idx, nil
 }
 

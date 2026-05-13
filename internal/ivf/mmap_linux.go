@@ -52,6 +52,7 @@ func LoadMmap(path string) (*IVFIndex, error) {
 		_ = unix.Munmap(data)
 		return nil, err
 	}
+	ComputeRadii(idx)
 	return idx, nil
 }
 
