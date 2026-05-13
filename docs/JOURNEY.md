@@ -26,7 +26,13 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 14 (impl) | k-means IVF index foundation | — | — | internal/ivf/ package: TrainKMeans (k-means++ + Lloyd's, 6 iters, sample 65536), AssignAll (full 3M-vector bucketing), Build (8-vec dim-major blocks, cluster-major bboxes 16-wide padded, centroids SoA). Determinism via fixed PCG seed. Tests pass, build is 84 MB / 77s. See lecture 09. |
 | 15 (impl) | AVX2 Plan 9 distance kernel | — | — | internal/kernel/ — hand-unrolled 14-dim AVX2 + FMA kernel with 3-stage early-exit at dims 4/6/8 via VCMPPS+VMOVMSKPS. Generic Go fallback as cross-check oracle. Under linux/amd64: matches generic on 1000 random trials, 17.11 ns/op vs 94.68 ns/op (5.5×). See lecture 10. |
 | 16 (impl) | IVF two-pass exact search | local: FP=0 FN=1 | local 247µs/op | internal/search/{ivf,centroid,bbox,top5}.go — fast tier picks top-32 closest centroids, then AABB-LB sweep over remaining 4064 clusters. Top5 stores i64 distances for exact tie-break; kernel runs f32 with 65536 safety margin. TestIVFFullVsBrute: 0 mismatches on 10820 sampled queries. TestIVFFullDataset: FP=0 FN=1 (matches phase 13 baseline). See lecture 11. |
-| 17 | Drop grid, ship Tier 1 | TBD | TBD | Delete internal/{dataset,search}/grid* + serialize/roundtrip. Slim Dataset to LoadFromGzipJSON only. Recapture PGO (247 µs/op M4 Pro Rosetta). Mac Mini Tier 1 result pending issue submission. |
+| 17 | Drop grid, ship Tier 1 (with broken readLabel) | **-2310** | 204ms | Issue #3813. readLabel regression: shortened to `b == 'F'` but JSON labels are lowercase. Index baked with 0 fraud labels → FN=23984 (every fraud approved). |
+| 17-fix | Restore proper readLabel | **3225** | 230ms | Issue #3859. Detection recovered; p99 doubled vs phase 13. IVF cluster sweep on every query was too expensive. |
+| 17b | Borderline-only AABB-LB sweep | **3406** | 259ms | Issue #3889. Eliminated 4 Err; p99 ≈ unchanged. HAProxy + mode http was the LB throughput cap. |
+| 17c | HAProxy `mode tcp` + nbthread 1 | **4205** | **41ms** | Issue #3904. Submission-only change; pure-byte forwarding LB. p99 dropped 6×, +800 from 17b. |
+| 17d | FastNProbe 32 → 16 | **4175** | 44ms | Issue #3912. Detection unchanged; p99 within noise. |
+| 18 (try 1) | SCM_RIGHTS LB — SEQPACKET listener | **health-fail** | n/a | Issue #3919. Connection reset — `so-no-forevis` connects to .ctrl as SOCK_STREAM. |
+| 18 (fixed) | fdpass listener as SOCK_STREAM | **5449** | **2.35ms** | Issue #3931. The LB never reads request/response bytes — it accept()s on :9999 and sendmsg-passes the client fd over .ctrl SOCK_STREAM to the APIs. p99 41ms → 2.35ms; +1244 over phase 17d, **+1626 over phase-13 baseline**. p99_score 2629/3000. |
 
 ## What I learned
 
