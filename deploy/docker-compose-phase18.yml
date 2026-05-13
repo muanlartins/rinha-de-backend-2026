@@ -1,0 +1,92 @@
+# Phase 18 — SCM_RIGHTS fd-passing LB
+#
+# Promotes from main to the submission branch's docker-compose.yml once
+# Tier 1 (issue #3859) lands a real score. See docs/lectures/12-scm-rights.md.
+#
+# Differences from the Tier 1 compose:
+#   - LB image is jrblatt/so-no-forevis:v1.0.0 (replaces haproxy:3.0-alpine)
+#   - LB env: UPSTREAMS, PORT, BUF_SIZE, WORKERS (no haproxy.cfg)
+#   - api1/api2 add API_CTRL_SOCKET so the fdpass listener opens at boot
+#   - LB cpus/memory budget: 0.16 / 30MB (haproxy had 0.10 / 16MB)
+#   - api1/api2 cpus stays at 0.42 each (was 0.45) so LB has headroom
+
+services:
+  api-1:
+    image: muanlartins/rinha-de-backend-2026:latest
+    pull_policy: always
+    platform: linux/amd64
+    container_name: rinha-go-api-1
+    environment:
+      - API_SOCKET=/var/run/rinha/api1.sock
+      - API_CTRL_SOCKET=/var/run/rinha/api1.sock.ctrl
+      - SHED_SLOTS=4
+      - SHED_TIMEOUT_MS=3
+    volumes:
+      - socket-dir:/var/run/rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          cpus: "0.42"
+          memory: "160MB"
+
+  api-2:
+    image: muanlartins/rinha-de-backend-2026:latest
+    pull_policy: always
+    platform: linux/amd64
+    container_name: rinha-go-api-2
+    environment:
+      - API_SOCKET=/var/run/rinha/api2.sock
+      - API_CTRL_SOCKET=/var/run/rinha/api2.sock.ctrl
+      - SHED_SLOTS=4
+      - SHED_TIMEOUT_MS=3
+    volumes:
+      - socket-dir:/var/run/rinha
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          cpus: "0.42"
+          memory: "160MB"
+
+  lb:
+    image: jrblatt/so-no-forevis:v1.0.0
+    pull_policy: always
+    platform: linux/amd64
+    container_name: rinha-go-lb
+    environment:
+      UPSTREAMS: /var/run/rinha/api1.sock,/var/run/rinha/api2.sock
+      PORT: "9999"
+      BUF_SIZE: "4096"
+      WORKERS: "1"
+    volumes:
+      - socket-dir:/var/run/rinha
+    ports:
+      - "9999:9999"
+    depends_on:
+      - api-1
+      - api-2
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          cpus: "0.16"
+          memory: "30MB"
+
+volumes:
+  socket-dir: {}
