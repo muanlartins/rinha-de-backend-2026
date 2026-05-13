@@ -38,6 +38,7 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 21 | Per-cluster radius pre-pruning + 3× PREFETCHT0 in asm kernel | **5471** | 2.23ms | Issue #4006. Two pure-speed wins from the top-3 review (jairoblatt-rust/joojf source). `ivf.ComputeRadii` populates per-cluster radius at load (~50ms, not serialized). `scanCluster` adds triangle-inequality LB (sqrt(centroid_dist) − radius) before AABB. Asm kernel issues 3 PREFETCHT0 for the next block's 192 unique bytes. Modest **+22.67** — HW prefetcher likely was already covering sequential block access; most of the gain was the radius pre-prune in the borderline sweep. |
 | 22 | NPROBE 16 → 8 + always-sweep (no borderline gate) | **5387** | 2.71ms | Issue #4024. Hypothesis: with radius pre-prune cheap, paying always-sweep covers NPROBE=8's recall holes. Local TestIVFFullVsBrute 0/10820 mismatches, TestIVFFullDataset FN=1 FP=0. **Regressed −84 vs phase 21.** Always-sweep cost ~500µs that the NPROBE=8 fast-tier savings (~30µs) didn't cover. Radius prune is sound but isn't cheap enough to pay K=4096 times per query. Reverted. |
 | 23 | NPROBE 16 → 12 + borderline-only retained | **5402** | 2.21ms | Issue #4066. Smaller fast tier without phase 22's regression. Local TestIVFFullVsBrute showed 1 mismatch (entry 25640) but TestIVFFullDataset FN=1 FP=0 unchanged. **Bot returned FN=2** (vs FN=1 baseline) → −70 vs phase 21. Cross-platform f32 precision: darwin/arm64 generic kernel disagrees with linux/amd64 AVX2 at the borderline; smaller fast tier exposed an extra borderline entry to the drift. Reverted. **NPROBE changes are off-limits without amd64 validation infrastructure.** |
+| 24 | Kernel early-exit cadence 4/6/8 → 8 (single gate) | **5471** | 2.23ms | Issue #4092. Hypothesis: dim-4 partial sum is too noisy to reliably prune; gates cost ~4 cycles each, paid per block. Removed dim-4 and dim-6 checkpoints in both asm kernel and generic Go fallback. Result: **5471.03 vs phase 21's 5471.55 = pure noise (Δ −0.52)**. The early gates were either firing rarely or perfectly cancelling. Score-neutral, kept the change for code simplicity. |
 
 ## Final state
 
@@ -46,9 +47,12 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 **Trajectory:**
 - Phase 13 baseline (grid + load shedder): 3823.65, p99 99.25ms — rank 86
 - Phase 20 (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): 5448.88, p99 2.35ms
-- **Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms** — current best
+- **Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms** — best
+- Phase 24 (cadence simplification): 5471.03, p99 2.23ms — score-neutral, code cleaner
 
 **Net: +1647.90 points, p99 cut 44×.**
+
+**Plateau confirmed** at 5471 ± 1 across phases 21 and 24. Phases 22 and 23 both regressed; the cross-platform precision lesson eliminated NPROBE/cluster-selection changes from the safe-to-ship set without amd64 validation infrastructure.
 
 ### Entry 5472 root cause (phase 23 investigation)
 
