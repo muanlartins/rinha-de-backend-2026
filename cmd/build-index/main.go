@@ -30,7 +30,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("load: %v", err)
 	}
-	log.Printf("load: %d vectors in %s", ds.Count, time.Since(t0))
+	var frauds int
+	for _, b := range ds.Labels {
+		if b == 1 {
+			frauds++
+		}
+	}
+	log.Printf("load: %d vectors (%d frauds) in %s", ds.Count, frauds, time.Since(t0))
 
 	t1 := time.Now()
 	centroids := ivf.TrainKMeans(ds.Vectors, ds.Count)
@@ -47,7 +53,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("build: %v", err)
 	}
-	log.Printf("build: %d blocks in %s", idx.Blocks, time.Since(t3))
+	var idxFrauds int
+	for _, b := range idx.Labels {
+		if b == 1 {
+			idxFrauds++
+		}
+	}
+	log.Printf("build: %d blocks, idx.Labels frauds=%d in %s", idx.Blocks, idxFrauds, time.Since(t3))
 
 	t4 := time.Now()
 	if err := idx.SerializeToFile(out); err != nil {

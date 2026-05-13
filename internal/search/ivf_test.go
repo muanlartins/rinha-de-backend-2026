@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"sync"
@@ -169,6 +170,165 @@ func TestIVFFullVsBrute(t *testing.T) {
 	if mismatch > 0 {
 		t.Errorf("expected exact match vs int16 brute; got %d mismatches", mismatch)
 	}
+}
+
+// TestIVFLoadedFullDataset is identical to TestIVFFullDataset, but uses an
+// index that has been Serialize'd to bytes and re-Load'ed. This catches
+// any divergence between the in-memory Built index and the on-disk
+// representation — i.e., the production code path.
+func TestIVFLoadedFullDataset(t *testing.T) {
+	idx, _ := loadIVFFixtures(t)
+	if idx == nil {
+		return
+	}
+
+	var buf bytes.Buffer
+	if err := idx.Serialize(&buf); err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	loaded, err := ivf.Load(&buf)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Cross-check every field. If RoundTrip passed but this fails, the
+	// fields differ between the test setups.
+	if !equalI16(idx.BlockData, loaded.BlockData) {
+		t.Fatalf("BlockData differs: in-mem %d vs loaded %d", len(idx.BlockData), len(loaded.BlockData))
+	}
+	if !equalU8(idx.Labels, loaded.Labels) {
+		t.Fatalf("Labels differ: in-mem %d vs loaded %d", len(idx.Labels), len(loaded.Labels))
+	}
+	if !equalF32(idx.Centroids, loaded.Centroids) {
+		t.Fatalf("Centroids differ: in-mem %d vs loaded %d", len(idx.Centroids), len(loaded.Centroids))
+	}
+	if !equalU32(idx.Offsets, loaded.Offsets) {
+		t.Fatalf("Offsets differ: in-mem %d vs loaded %d", len(idx.Offsets), len(loaded.Offsets))
+	}
+	if !equalI16(idx.BboxMin, loaded.BboxMin) {
+		t.Fatalf("BboxMin differs")
+	}
+	if !equalI16(idx.BboxMax, loaded.BboxMax) {
+		t.Fatalf("BboxMax differs")
+	}
+	// Count fraud labels in both:
+	var inMemFrauds, loadedFrauds int
+	for _, b := range idx.Labels {
+		if b == 1 {
+			inMemFrauds++
+		}
+	}
+	for _, b := range loaded.Labels {
+		if b == 1 {
+			loadedFrauds++
+		}
+	}
+	t.Logf("fraud labels: in-mem=%d loaded=%d", inMemFrauds, loadedFrauds)
+	t.Logf("Labels len: in-mem=%d loaded=%d", len(idx.Labels), len(loaded.Labels))
+
+	// Check the source ds.Labels to see if THAT has frauds.
+	_, ds := loadIVFFixtures(t)
+	var dsFrauds int
+	for _, b := range ds.Labels {
+		if b == 1 {
+			dsFrauds++
+		}
+	}
+	t.Logf("ds.Labels frauds: %d / %d", dsFrauds, len(ds.Labels))
+
+	f, err := os.Open("../../references/rinha-official/test/test-data.json")
+	if err != nil {
+		t.Skipf("test-data unavailable: %v", err)
+		return
+	}
+	defer f.Close()
+
+	type entry struct {
+		Request          json.RawMessage `json:"request"`
+		ExpectedApproved bool            `json:"expected_approved"`
+	}
+	var top struct {
+		Entries []entry `json:"entries"`
+	}
+	if err := json.NewDecoder(f).Decode(&top); err != nil {
+		t.Fatal(err)
+	}
+
+	var scratch IVFScratch
+	parseFails, fp, fn := 0, 0, 0
+	for _, e := range top.Entries {
+		var qi [dataset.Stride]int16
+		if !vector.VectorizeFast(e.Request, &qi) {
+			parseFails++
+			continue
+		}
+		var qf [dataset.Dims]float32
+		var qiArr [dataset.Dims]int16
+		for d := 0; d < dataset.Dims; d++ {
+			qf[d] = float32(qi[d])
+			qiArr[d] = qi[d]
+		}
+		count := FraudCountIVF(&qf, &qiArr, loaded, &scratch)
+		approved := (float64(count) / 5.0) < 0.6
+		switch {
+		case approved && !e.ExpectedApproved:
+			fn++
+		case !approved && e.ExpectedApproved:
+			fp++
+		}
+	}
+	t.Logf("loaded-index full set: parse_fails=%d FP=%d FN=%d", parseFails, fp, fn)
+	if fp+fn > 2 {
+		t.Errorf("loaded index regressed: FP=%d FN=%d (in-memory FN=1)", fp, fn)
+	}
+}
+
+func equalI16(a, b []int16) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalU8(a, b []uint8) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalF32(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalU32(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestIVFFullDataset runs the full 54 100-entry test set through IVF and

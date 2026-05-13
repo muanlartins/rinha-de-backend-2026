@@ -222,10 +222,26 @@ func readFloat(br *bufio.Reader) (val float32, last byte, err error) {
 	}
 }
 
+// readLabel parses a label value (after the opening quote): either "fraud"
+// (5 bytes + closing quote) or "legit" (5 bytes + closing quote). Returns
+// true if fraud.
 func readLabel(br *bufio.Reader) (bool, error) {
-	b, err := br.ReadByte()
+	var buf [5]byte
+	if _, err := io.ReadFull(br, buf[:]); err != nil {
+		return false, err
+	}
+	next, err := br.ReadByte()
 	if err != nil {
 		return false, err
 	}
-	return b == 'F', nil
+	if next != '"' {
+		return false, fmt.Errorf("expected '\"' after label, got %q", next)
+	}
+	switch buf {
+	case [5]byte{'f', 'r', 'a', 'u', 'd'}:
+		return true, nil
+	case [5]byte{'l', 'e', 'g', 'i', 't'}:
+		return false, nil
+	}
+	return false, fmt.Errorf("unknown label %q", buf)
 }
