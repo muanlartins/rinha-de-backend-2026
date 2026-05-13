@@ -12,7 +12,13 @@ import (
 // top submissions (jairoblatt rank #2: 5; steixeira93 rank #4/#6: 8). With
 // borderline-only escalation (count ∈ {2,3}) the fast tier handles ~85%
 // of queries, so keeping it tight is the lever for p99.
-const FastNProbe = 16
+//
+// Dropped from 16 → 8 in phase 22, paired with the always-sweep variant
+// (the borderline-only escalation can't catch counts that drift to
+// 0/1/4/5 when the fast tier is too narrow). With radius pre-pruning
+// (phase 21) the sweep is cheap — most clusters pruned by the scalar
+// radius check before AABB even runs.
+const FastNProbe = 8
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
 // from a sync.Pool — every field is touched on the hot path.
@@ -80,25 +86,19 @@ func FraudCountIVF(
 		scratch.Scanned[c/64] |= 1 << (c % 64)
 	}
 
-	// 5. Borderline-only AABB-LB sweep. Most queries (~85%) have a count
-	//    of 0/1/4/5 after the fast tier — the binary classification is
-	//    stable to a single-neighbor swap, so the sweep can't change the
-	//    answer. Only count ∈ {2,3} can flip across the 3-of-5 threshold,
-	//    so we escalate only there. This is the survey's "borderline-only
-	//    escalation" pattern (lecture 11 § two-tier search). p99 impact
-	//    drops from 4096-cluster-per-query to ~15% of queries paying that
-	//    cost.
-	count := scratch.Top.FraudCount()
-	if count == 2 || count == 3 {
-		for c := uint16(0); c < uint16(ivf.K); c++ {
-			if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
-				continue
-			}
-			scanCluster(c, qf, qi, idx, scratch)
+	// 5. Always-sweep with sound radius+AABB LB. Borderline-only
+	//    escalation works only if the fast tier's count is roughly
+	//    correct — at NPROBE=8 the count can drift to 0/1/4/5 with
+	//    wrong neighbors, evading the {2,3} trigger. The sweep with
+	//    radius pre-prune (phase 21) is ~5ns scalar per cluster, so
+	//    paying it on every query is cheap.
+	for c := uint16(0); c < uint16(ivf.K); c++ {
+		if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
+			continue
 		}
-		count = scratch.Top.FraudCount()
+		scanCluster(c, qf, qi, idx, scratch)
 	}
-	return count
+	return scratch.Top.FraudCount()
 }
 
 
