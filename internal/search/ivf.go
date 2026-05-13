@@ -6,10 +6,11 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/kernel"
 )
 
-// Search configuration. Picking the top N closest centroids gives the hot
-// clusters first; the worst-of-top-5 tightens fast and the AABB-LB sweep
-// over the remaining K-N clusters then prunes ~99% of them in 14 ops each.
-const FastNProbe = 32
+// Search configuration. FastNProbe matches the survey consensus across
+// top submissions (jairoblatt rank #2: 5; steixeira93 rank #4/#6: 8). With
+// borderline-only escalation (count ∈ {2,3}) the fast tier handles ~85%
+// of queries, so keeping it tight is the lever for p99.
+const FastNProbe = 16
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
 // from a sync.Pool — every field is touched on the hot path.
