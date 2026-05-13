@@ -18,7 +18,11 @@ import (
 func Listen(ctrlPath string) (<-chan int, int, error) {
 	_ = unix.Unlink(ctrlPath)
 
-	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	// SOCK_STREAM matches the jrblatt/so-no-forevis and andrade-cpp-ivf
+	// wire protocol — they connect() to the .ctrl socket as STREAM. Using
+	// SEQPACKET here would refuse the connection. SCM_RIGHTS ancillary
+	// data works the same on STREAM as on SEQPACKET.
+	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, 0, fmt.Errorf("socket: %w", err)
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 // TestRecvLoopback opens a pair of pipes (a TCP listener + a client
-// connection), then sends the client fd over a SEQPACKET control socket
+// connection), then sends the client fd over a STREAM control socket
 // using SCM_RIGHTS. The Listen-returned channel must yield the fd, and a
 // write to that fd must reach the listener.
 func TestRecvLoopback(t *testing.T) {
@@ -24,8 +24,9 @@ func TestRecvLoopback(t *testing.T) {
 	}
 	t.Cleanup(func() { unix.Close(listenFd) })
 
-	// Connect to the SEQPACKET listener — this is what an LB would do.
-	clientFd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
+	// Connect to the STREAM listener — this is what jrblatt/so-no-forevis
+	// does in production.
+	clientFd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("client socket: %v", err)
 	}
