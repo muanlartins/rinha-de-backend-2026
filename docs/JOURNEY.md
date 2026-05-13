@@ -35,16 +35,55 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 18 (fixed) | fdpass listener as SOCK_STREAM | **5449** | **2.35ms** | Issue #3931. The LB never reads request/response bytes — it accept()s on :9999 and sendmsg-passes the client fd over .ctrl SOCK_STREAM to the APIs. p99 41ms → 2.35ms; +1244 over phase 17d, **+1626 over phase-13 baseline**. p99_score 2629/3000. |
 | 19 | mmap + MADV_RANDOM/POPULATE_READ/HUGEPAGE + 500-iter warmup | **5446** | 2.36ms | Issue #3945. Statistical tie with phase 18 — the api was never memory-pressured at 84MB heap inside 167MB cgroup, so page-cache sharing didn't matter. mmap loads the index in 2ms (vs 80ms read-into-heap) — trims startup time only. **Plateau reached.** |
 | 20 | CPU split 0.45/0.45/0.10 (lb → apis) | **5449** | 2.35ms | Issue #3952. Statistical tie with phases 18/19 (5449/5446/5449 across three runs). so-no-forevis at 0.10 CPU still keeps up — per-request api work is already short enough that extra CPU per replica doesn't shave further. **Plateau confirmed at ~5448 ± 3.** |
+| 21 | Per-cluster radius pre-pruning + 3× PREFETCHT0 in asm kernel | **5471** | 2.23ms | Issue #4006. Two pure-speed wins from the top-3 review (jairoblatt-rust/joojf source). `ivf.ComputeRadii` populates per-cluster radius at load (~50ms, not serialized). `scanCluster` adds triangle-inequality LB (sqrt(centroid_dist) − radius) before AABB. Asm kernel issues 3 PREFETCHT0 for the next block's 192 unique bytes. Modest **+22.67** — HW prefetcher likely was already covering sequential block access; most of the gain was the radius pre-prune in the borderline sweep. |
+| 22 | NPROBE 16 → 8 + always-sweep (no borderline gate) | **5387** | 2.71ms | Issue #4024. Hypothesis: with radius pre-prune cheap, paying always-sweep covers NPROBE=8's recall holes. Local TestIVFFullVsBrute 0/10820 mismatches, TestIVFFullDataset FN=1 FP=0. **Regressed −84 vs phase 21.** Always-sweep cost ~500µs that the NPROBE=8 fast-tier savings (~30µs) didn't cover. Radius prune is sound but isn't cheap enough to pay K=4096 times per query. Reverted. |
+| 23 | NPROBE 16 → 12 + borderline-only retained | **5402** | 2.21ms | Issue #4066. Smaller fast tier without phase 22's regression. Local TestIVFFullVsBrute showed 1 mismatch (entry 25640) but TestIVFFullDataset FN=1 FP=0 unchanged. **Bot returned FN=2** (vs FN=1 baseline) → −70 vs phase 21. Cross-platform f32 precision: darwin/arm64 generic kernel disagrees with linux/amd64 AVX2 at the borderline; smaller fast tier exposed an extra borderline entry to the drift. Reverted. **NPROBE changes are off-limits without amd64 validation infrastructure.** |
 
 ## Final state
 
-**Score: 5448.88 / 6000** (90.8% of max). p99 2.35 ms, FP=0, FN=1, Err=0. Detection 2819.38/3000 (saturated modulo 1 structural FN on test-data entry 5472). p99 2629.5/3000.
+**Score: 5471.55 / 6000** (91.2% of max, phase 21 best). p99 2.23 ms, FP=0, FN=1, Err=0. Detection 2819.38/3000 (saturated modulo 1 structural FN). p99 2652.17/3000.
 
 **Trajectory:**
 - Phase 13 baseline (grid + load shedder): 3823.65, p99 99.25ms — rank 86
-- Phase 20 final (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): **5448.88, p99 2.35ms** — ~rank 20-25 of ~330 submissions
+- Phase 20 (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): 5448.88, p99 2.35ms
+- **Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms** — current best
 
-**Net: +1625.23 points, p99 cut 42×.** Single largest win: phase 18 SCM_RIGHTS LB swap (+1244 alone).
+**Net: +1647.90 points, p99 cut 44×.**
+
+### Entry 5472 root cause (phase 23 investigation)
+
+The 1 structural FN comes from int16 quantization granularity, not a tie-break. Inspect test ran brute-force KNN for entry 5472:
+```
+rank  0: ref=1271884 dist=30999568  label=0   (legit)
+rank  1: ref=1635811 dist=47292599  label=0
+rank  2: ref=2963210 dist=54602137  label=1   (fraud)
+rank  3: ref=2998531 dist=55310927  label=1
+rank  4: ref= 703996 dist=56586305  label=0   ← our top-5 boundary (legit)
+rank  5: ref=1707961 dist=56595244  label=1   (fraud, 8939 i64 units past d[4])
+```
+
+Top-5 has 2 fraud + 3 legit → count=2 → approve. Oracle expects deny (count≥3). The fraud at rank 5 is only **8939 i64 units past the boundary** — about **0.007% relative** to d[4]. At int16×32000 quantization, 8939 units corresponds to ~2.25 int16 units per dim — the limit of what the quantization can distinguish. The oracle (presumably running on raw float vectors) ranks ref=1707961 just inside the top-5.
+
+Fixing this would require:
+- Float32 references (14 × 4 × 3M = 168MB) — exceeds 350MB budget with 2 replicas
+- Higher-precision integer quantization (int32) — major refactor, ~2× memory
+- Matching the oracle's exact arithmetic — unknown
+
+The FN=1 is structural at this memory budget. Accepted.
+
+### Cross-platform precision lesson (phase 23 regression)
+
+Local tests on darwin/arm64 use the generic Go kernel (pure float math); production runs the AVX2+FMA asm kernel on linux/amd64. F32 rounding differs subtly between the two — usually within `kernelSafety = 65536` (and that's why we have the margin). But the SEARCH ALGORITHM is sensitive to the cluster ordering at the centroid-distance level, which is also computed in f32. With smaller NPROBE, the top-N closest centroids can include or exclude borderline candidates differently across platforms.
+
+Local FN=1 doesn't necessarily mean bot FN=1. **Don't ship NPROBE changes without amd64 validation.** Same applies to other f32-dependent algorithm changes (early-exit cadence, kernelSafety tuning).
+
+### What's still on the table for future phases
+
+- **i32 integer kernel** (top-3 pattern): replaces `VPMOVSXWD + VCVTDQ2PS + VBROADCASTSS + VSUBPS + VFMADD231PS` with `VPMOVSXWD + VPBROADCASTD + VPSUBD + VPMULLD + VPADDD`. On Haswell VPMULLD is 10-cycle latency vs 5-cycle FMA, so this MAY be a wash or regression — Agent B's optimistic claim wasn't quantified. Worth a controlled test if amd64 validation lands.
+- **VPMADDWD-based kernel** (int16 multiply-pair): more promising than i32. Computes 4 squared diffs per dim-pair into one i32 accumulator. Latency 5 cycles, throughput 0.5 — actually competitive with FMA.
+- **Pipelined writev batching** (jairoblatt's HTTP loop): parse up to N requests per round, emit all responses in one writev syscall. Requires rewriting the raw HTTP serve loop.
+- **PGO refresh** from real load (not synthetic warmup) — we don't have an easy way to capture this.
+- **The 1 structural FN** is accepted (see above).
 
 **Where the work went:**
 - 6 concept lectures (08-13) written before each implementation layer
