@@ -6,6 +6,7 @@ services:
     container_name: rinha-go-api-1
     environment:
       - API_SOCKET=/var/run/rinha/api1.sock
+      - API_CTRL_SOCKET=/var/run/rinha/api1.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
     volumes:
@@ -19,8 +20,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "167MB"
+          cpus: "0.42"
+          memory: "160MB"
 
   api-2:
     image: muanlartins/rinha-de-backend-2026:latest
@@ -29,6 +30,7 @@ services:
     container_name: rinha-go-api-2
     environment:
       - API_SOCKET=/var/run/rinha/api2.sock
+      - API_CTRL_SOCKET=/var/run/rinha/api2.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
     volumes:
@@ -42,18 +44,21 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "167MB"
+          cpus: "0.42"
+          memory: "160MB"
 
   lb:
-    image: haproxy:3.0-alpine
+    image: jrblatt/so-no-forevis:v1.0.0
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-lb
+    environment:
+      UPSTREAMS: /var/run/rinha/api1.sock,/var/run/rinha/api2.sock
+      PORT: "9999"
+      BUF_SIZE: "4096"
+      WORKERS: "1"
     volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - socket-dir:/var/run/rinha
-    command: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-db"]
     ports:
       - "9999:9999"
     depends_on:
@@ -68,8 +73,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "16MB"
+          cpus: "0.16"
+          memory: "30MB"
 
 volumes:
   socket-dir: {}
