@@ -20,8 +20,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.42"
-          memory: "160MB"
+          cpus: "0.45"
+          memory: "165MB"
 
   api-2:
     image: muanlartins/rinha-de-backend-2026:latest
@@ -44,8 +44,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.42"
-          memory: "160MB"
+          cpus: "0.45"
+          memory: "165MB"
 
   lb:
     image: jrblatt/so-no-forevis:v1.0.0
@@ -73,8 +73,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.16"
-          memory: "30MB"
+          cpus: "0.10"
+          memory: "20MB"
 
 volumes:
   socket-dir: {}
