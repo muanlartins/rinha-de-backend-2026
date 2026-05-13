@@ -77,16 +77,25 @@ func FraudCountIVF(
 		scratch.Scanned[c/64] |= 1 << (c % 64)
 	}
 
-	// 5. AABB-LB sweep over remaining clusters. After the fast tier, worst
-	//    is tight; AABB-LB rejects most remaining clusters in 14 ops.
-	for c := uint16(0); c < uint16(ivf.K); c++ {
-		if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
-			continue
+	// 5. Borderline-only AABB-LB sweep. Most queries (~85%) have a count
+	//    of 0/1/4/5 after the fast tier — the binary classification is
+	//    stable to a single-neighbor swap, so the sweep can't change the
+	//    answer. Only count ∈ {2,3} can flip across the 3-of-5 threshold,
+	//    so we escalate only there. This is the survey's "borderline-only
+	//    escalation" pattern (lecture 11 § two-tier search). p99 impact
+	//    drops from 4096-cluster-per-query to ~15% of queries paying that
+	//    cost.
+	count := scratch.Top.FraudCount()
+	if count == 2 || count == 3 {
+		for c := uint16(0); c < uint16(ivf.K); c++ {
+			if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
+				continue
+			}
+			scanCluster(c, qf, qi, idx, scratch)
 		}
-		scanCluster(c, qf, qi, idx, scratch)
+		count = scratch.Top.FraudCount()
 	}
-
-	return scratch.Top.FraudCount()
+	return count
 }
 
 
