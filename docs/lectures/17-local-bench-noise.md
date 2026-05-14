@@ -107,3 +107,51 @@ We have **two bot submissions queued for tomorrow** (5/day cap resets):
 If both land cleanly we'll be in top 5-6 with strong odds of top 3.
 Sub-1 ms is achievable with VPMADDWD + Phase 34, but no guarantees;
 the bot has ±5 score noise and our gap to top-1 is ~45 score.
+
+## Phase 35 prep-period summary (2026-05-14)
+
+After re-profiling the current build I made three small structural
+changes that are safe to ship and one I'm deferring:
+
+- **Phase 35a — Offset-based pipelined parsing.** rawhttp.go now
+  advances a `pos` cursor instead of memmove-ing the buffer after
+  every request. Synthetic bench: 113.8 ns → 86 ns/req (-24 %).
+  Real bot delta likely <5 µs because real /fraud-score is
+  ~10 µs of search work.
+- **Phase 35b — Removed time.After from the shedder hot path.**
+  Replaced `case <-time.After(shedTimeoutDur)` with `default`. The
+  shedder never fires in practice (4 slots / GOMAXPROCS=1) so we
+  were paying for Timer allocation + runtime.timersMutex lock on
+  every /fraud-score request. Theoretical save: 100-500 ns/req.
+- **Phase 35c — Optional GC-off via `STEADY_GC_OFF=1` env var.**
+  After warmup, calls `debug.SetGCPercent(-1)` and runs a periodic
+  GC every 5 s in a background goroutine. Eliminates the STW pause
+  from request paths. Safety belt: GOMEMLIMIT=140MB still forces a
+  GC near the limit. Opt-in only; first bot test will toggle it on.
+
+Deferred:
+
+- **VPMADDWD kernel (was 35b in lecture 15).** On closer reading,
+  the implementation needs i32 → i64 promotion after every 2
+  dim-pairs to avoid overflow (max squared diff at scale=10000 is
+  4 × 10⁸, summed across 7 pairs is 5.6 × 10⁹, overflows i32).
+  Promotion (VPMOVSXDQ + VPADDQ) eats most of the op-count savings.
+  Estimated win shrinks from -30 µs to maybe -10 µs at p99 — still
+  positive but not the order-of-magnitude lever I first thought.
+  Defer until cheap wins are bot-validated.
+
+## Submission queue for tomorrow
+
+Five slots; my current order of priority:
+
+1. **Phase 34 (heap picker)** — already pushed as `:phase34`; just
+   re-tag and `rinha/test` it. Predicted +5-10 score.
+2. **Phase 35a+b combined** — offset parsing + time.After removal.
+   Need to build a new image. Predicted +0-10 score.
+3. **Phase 35c (GC off)** — same image as #2 with
+   `STEADY_GC_OFF=1` flipped in compose. Predicted +0-30 score
+   (unknown upside, biggest uncertainty).
+4. Reserve slot for follow-up if #1-3 land cleanly and there's
+   headroom.
+5. Reserve slot for VPMADDWD prototype if I get time to validate it
+   tomorrow morning.
