@@ -163,13 +163,17 @@ func (h *Handler) fraudScoreRaw(body []byte) []byte {
 		return rawhttpResponses[0]
 	}
 
-	// === Load shedder. Try to acquire a slot within the shed timeout. If
-	// we can't, return the default "approved" response. Under low load
-	// the select acquires immediately and the timeout never fires.
+	// === Load shedder. Try to acquire a slot non-blockingly. If full,
+	// return the default "approved" response immediately. Phase 35b
+	// replaced `time.After(shedTimeoutDur)` (allocates a Timer + takes
+	// runtime.timersMutex per call) with a `default` branch — the
+	// timeout never actually fired in practice (4 slots / 1 GOMAXPROCS
+	// means a request never queues), so paying for `time.After`'s
+	// allocation per request was pure waste.
 	select {
 	case shedSem <- struct{}{}:
 		defer func() { <-shedSem }()
-	case <-time.After(shedTimeoutDur):
+	default:
 		shedCount.Add(1)
 		return rawhttpResponses[0]
 	}
