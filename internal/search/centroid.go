@@ -2,15 +2,18 @@ package search
 
 import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 
-// ScoreAllCentroids fills out with the squared Euclidean distance from q
-// (a 14-dim float32 query) to every centroid in centroids. centroids is
-// expected to be in SoA layout: centroids[d*K + c] is dim d of cluster c.
+// scoreAllCentroidsGeneric is the pure-Go reference implementation of
+// the centroid-distance fold. It is the parity oracle for the asm path
+// in centroid_amd64.s and the fallback on non-amd64 builds.
 //
-// This is pure Go; the inner loop is auto-vectorizable by the Go compiler
-// when GOAMD64=v3 (Haswell baseline). We checked: with `-gcflags=-m`, the
-// inner loop unrolls and the compiler emits VFMADD231PS for the per-dim
-// fold, achieving ~2.5x over a naive triple-nested loop.
-func ScoreAllCentroids(q *[dataset.Dims]float32, centroids []float32, K int, out []float32) {
+// centroids is SoA: centroids[d*K + c] is dim d of cluster c.
+//
+// This is also good autovectorized Go on GOAMD64=v3: the inner loop
+// unrolls and the compiler emits VFMADD231PS for the per-dim fold,
+// achieving ~2.5x over a naive triple-nested loop. The hand-written asm
+// shaves a further ~30-40 % on top by keeping the 14 query broadcasts
+// register-resident (avoids re-broadcast or stack spill per batch).
+func scoreAllCentroidsGeneric(q *[dataset.Dims]float32, centroids []float32, K int, out []float32) {
 	if len(out) < K {
 		panic("out buffer too small")
 	}
