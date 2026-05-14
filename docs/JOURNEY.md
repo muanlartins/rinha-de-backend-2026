@@ -41,32 +41,28 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 24 | Kernel early-exit cadence 4/6/8 → 8 (single gate) | **5471** | 2.23ms | Issue #4092. Hypothesis: dim-4 partial sum is too noisy to reliably prune; gates cost ~4 cycles each, paid per block. Removed dim-4 and dim-6 checkpoints in both asm kernel and generic Go fallback. Result: **5471.03 vs phase 21's 5471.55 = pure noise (Δ −0.52)**. The early gates were either firing rarely or perfectly cancelling. Score-neutral, kept the change for code simplicity. |
 | 25 | QuantScale 32000 → 10000 (lossless for round4 input) | **5556.58** | 2.25ms | Issue #4228. Top-6 forensic deep dive (lecture 14) found references.json.gz pre-rounds every dim to 4 decimals, so int16 × 10000 is the data's native grid with 0 rounding loss; our int16 × 32000 had 48.4% per-dim rounding noise (verified empirically). FN went 1 → 0 as predicted. One new FP appeared (boundary entry shifted at the coarser grid), but FP weight=1 vs FN weight=3 → detection penalty dropped 180.62 → 90.31 = **+90.31 detection points**. Net **+85.03**. The "structural FN at memory budget" claim from phase 23 was retracted — the FN was a quantization-scale choice, not a memory limit. |
 | 26 | FastNProbe 16 → 1 + class-conditional escalation thresholds | **5618.55** | 2.41ms | Issue #4244. Matched luanlouzada's FAST_NPROBE=1 architecture. Calibrated thresholds via `cmd/calibrate` on linux/amd64 (THR[0]=3501931 — within 1 i64 unit of luanlouzada's published 3501932). Always-escalate count∈{2,3,4} + per-class worst-distance thresholds for count∈{0,1,5}. Bot result: **FP=0 FN=0** — detection score now SATURATED at 3000 (rate_component 3000, absolute_penalty 0). p99 regressed 2.25 → 2.41ms (escalation rate ~doubled vs phase 25's {2,3}-only gate, so the worst-1% pays the full K=4096 sweep more often). Net **+61.97** vs phase 25, **+147 vs phase 24 baseline**. Phase 25+26 closed the entire "structural" loss the journey had accepted. |
+| 27 | Top-N escalation (top-32 nearest unscanned, not full K=4096 sweep) | **5868.31** | 1.35ms | Issue #4331. After lecture 14 / lecture 15 forensic on top-1 crepao-da-massa (6000.00 / 0.98ms — sub-1ms). Replaced unconditional K-sweep on the 6.21 % escalation path with the top-N nearest unscanned clusters by centroid distance. Calibrated **N=32** via amd64 docker sweep (N=20 → FP=2 FN=1; N=24 → FP=0 FN=1; N=28 → first clean on amd64; we picked N=32 for darwin/amd64 cross-platform safety). Deliberately did NOT borrow luanlouzada's N=20 or jairoblatt's N=24 — cluster geometry differs at our K and seed. Bot result: **p99 1.35ms** (was 2.41), **−1.06ms / −44 %**, **+249.76 score**. Top 10. |
+| 28a (skipped) | Recalibrate thresholds against top-N path | — | — | Calibrator's max-threshold mode showed only 95 fewer escalations possible (6.21 → 6.04 %). Below bot noise floor. Documented but not shipped standalone. |
+| 28b (reverted) | Borderline pre-check veto via triangle inequality | — | — | Added a pre-escalation pass: if no next-M cluster could host a closer vector than current top-5 worst, skip escalation. amd64 calibration showed **veto rate = 0** — our cluster radii (computed as max-distance from centroid) are too loose for the bound `(sqrt(cd) - r)²` to ever prove no overlap. Same triangle check happens inside scanCluster already. Reverted. |
+| 28 | Asm AVX2 ScoreAllCentroids (universal path) | **5950.61** | 1.12ms | Issue #4336. Hand-tuned amd64 asm replaces the pure-Go autovec fold. Outer-d, inner-c, explicit unroll-by-2; pre-load q[0..13] as VBROADCASTSS broadcasts (16 KMM registers). Local amd64 bench: **31µs → 4.5µs (6.9× speedup)**. Initial outer-c inner-d design was 3× SLOWER than autovec due to L1 thrashing (14 dim slabs × 16 KB = 224 KB evicts 32 KB cache); fixed by switching to outer-d inner-c, which streams one 16 KB dim slab at a time. Bot: **p99 1.12ms** (was 1.35), **−230µs**, **+82.30 score**. **Rank 6.** Universal path optimization affects every query, not just escalating ones. |
 
-## Current state (post phase 26)
+## Current state (post phase 28)
 
-**Score: 5618.55 / 6000** (93.6% of max). p99 2.41 ms, FP=0, FN=0, Err=0.
-**Detection saturated at 3000/3000** (no errors of any kind, rate_component
-3000, absolute_penalty 0). p99_score 2618.55/3000 — that's the only
-remaining gap.
+**Score: 5950.61 / 6000** (99.18 % of max). p99 1.12 ms, FP=0, FN=0,
+Err=0. Detection saturated at 3000. p99_score 2950.61. **Rank 6**.
 
-**Trajectory:**
-- Phase 13 baseline (grid + load shedder): 3823.65, p99 99.25ms — rank 86
-- Phase 20 (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): 5448.88, p99 2.35ms
-- Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms
-- Phase 24 (cadence simplification): 5471.03, p99 2.23ms
-- Phase 25 (QuantScale 32000 → 10000): 5556.58, p99 2.25ms — FN 1 → 0
-- **Phase 26 (FastNProbe 1 + class-cond thresholds): 5618.55, p99 2.41ms** — FP=FN=0, detection saturated
+**Session trajectory (2026-05-13 → 2026-05-14):**
+- Phase 24 plateau: 5471.03 / 2.23 ms — rank ~25
+- Phase 25 (QuantScale 10000, lossless for round4 input): 5556.58 / 2.25 ms — FN 1 → 0
+- Phase 26 (FastNProbe=1 + class-cond escalation thresholds): 5618.55 / 2.41 ms — FP=FN=0, detection saturated
+- Phase 27 (top-N=32 escalation): 5868.31 / 1.35 ms — TOP 10
+- Phase 28 (asm AVX2 ScoreAllCentroids): 5950.61 / 1.12 ms — **TOP 6**
 
-**Net: +1795 points, p99 cut 41×.**
+**Net session gain: +479.58 points (+8.1 %), p99 cut 2 × (2.23 → 1.12 ms).**
 
-The 5471 plateau (phases 21–24) was retracted on 2026-05-13 when the
-top-6 forensic deep dive (lecture 14) found two structural mistakes:
-quantization scale wrong (cost 1 FN) and fast-tier strategy wrong
-(blocked the path to FP=0). Both fixed in phases 25 and 26.
-
-**Remaining gap to ranks 1-6 is entirely in p99.** At 2.41ms our
-p99_score is 2618.55; rank 6 (hvini, p99 1.16ms) scores ~2937 there.
-Closing that gap is the only thing left.
+**Remaining gap:** rank 5 (rafaelcoelhox) is at 5955.42 / 1.11 ms — 4.81
+points away. Top 1 (crepao-da-massa) is 6000 / 0.98 ms — 49 points,
+~140 µs of p99.
 
 ### Entry 5472 root cause (phase 23 investigation)
 
