@@ -142,16 +142,40 @@ Deferred:
 
 ## Submission queue for tomorrow
 
-Five slots; my current order of priority:
+Five slots; updated priority order after local 3-config A/B:
 
-1. **Phase 34 (heap picker)** — already pushed as `:phase34`; just
-   re-tag and `rinha/test` it. Predicted +5-10 score.
-2. **Phase 35a+b combined** — offset parsing + time.After removal.
-   Need to build a new image. Predicted +0-10 score.
-3. **Phase 35c (GC off)** — same image as #2 with
-   `STEADY_GC_OFF=1` flipped in compose. Predicted +0-30 score
-   (unknown upside, biggest uncertainty).
-4. Reserve slot for follow-up if #1-3 land cleanly and there's
-   headroom.
-5. Reserve slot for VPMADDWD prototype if I get time to validate it
-   tomorrow morning.
+### Local A/B result (2026-05-14, 3-4 runs each)
+
+| Config | p99 runs (ms) | p99 median | score median |
+|---|---|---:|---:|
+| Baseline (Phase 33) | 3.24, 2.23, 2.21 | 2.22 | 5654 |
+| p35-default (35a+b only) | 5.03, 2.12, 2.37, 3.02 | 2.37 | 5520 |
+| **p35-gcoff (+ STEADY_GC_OFF=1)** | **1.81, 2.12, 2.09, 1.90** | **1.90** | **5680** |
+
+The GC-off variant **cut local p99 median by 320 µs** and dramatically
+tightened the variance (all 4 runs within 310 µs of each other; no
+cold-start outlier). p35-default looks slightly worse than baseline
+but the spread is huge — it's in the noise band.
+
+This is the cleanest local signal we've ever measured. The GC pauses
+were the local-p99 dominator. If this maps proportionally to the bot
+(Mac Mini ~ same GC behavior as Linux/amd64 Docker), Phase 33's
+1.11 ms bot p99 should drop to **~0.94-1.00 ms — top 1-2 territory**.
+
+### Order of operations
+
+1. **#1 SUBMISSION: Phase 35 image + STEADY_GC_OFF=1.** The big bet.
+   Image `:phase35` already pushed. Submission compose updated with
+   `STEADY_GC_OFF=1` env var. One `git push origin submission` +
+   one `rinha/test` issue.
+2. **#2 SUBMISSION: Phase 35 image + STEADY_GC_OFF=0 (default GC).**
+   Isolates the GC-off contribution from the parsing/timer fixes.
+   Tells us if 35a+b alone was a regression or fine.
+3. **#3 SUBMISSION: Phase 34 image (heap picker).** Already pushed,
+   already validated; expected +5 score baseline. Cheap.
+4. **#4 follow-up** based on what #1-3 showed.
+5. **#5 reserve.**
+
+If #1 lands at ≤ 1.05 ms, we're top-3 minimum and may not need #2-5.
+If #1 disappoints, #2 tells us whether to roll back to 35a+b only or
+to Phase 33.
