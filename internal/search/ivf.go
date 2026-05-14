@@ -40,7 +40,7 @@ import (
 const (
 	FastNProbe     = 1
 	EscalateNProbe = 32
-	MaxNProbe      = 64
+	MaxNProbe      = 256
 )
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request

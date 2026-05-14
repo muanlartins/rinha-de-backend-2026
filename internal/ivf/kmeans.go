@@ -7,8 +7,15 @@ import (
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 )
 
-// K is the number of clusters. Matches the consensus across the top
-// rinha-de-backend-2026 submissions. See docs/lectures/09-kmeans-ivf.md.
+// K is the number of IVF clusters. Phase 30 experimented with K=8192
+// (smaller clusters, ~366 vec/cluster) and K=2048 (larger clusters,
+// ~1465 vec/cluster). Both produced a persistent FN=1 that no practical
+// top-N could recover — the full-K AABB-LB sweep catches the entry via
+// bbox pruning but ranking by centroid distance does not include the
+// containing cluster within any tractable N.
+//
+// K=4096 turned out to be a structural sweet spot for our top-N
+// escalation strategy. Both directions regress. See JOURNEY phase 30.
 const K = 4096
 
 // SampleSize is the row count used to train Lloyd's algorithm. We do not
