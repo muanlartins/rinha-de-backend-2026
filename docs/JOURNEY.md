@@ -40,20 +40,33 @@ A record of every iteration on the Rinha submission, what worked, what didn't, a
 | 23 | NPROBE 16 → 12 + borderline-only retained | **5402** | 2.21ms | Issue #4066. Smaller fast tier without phase 22's regression. Local TestIVFFullVsBrute showed 1 mismatch (entry 25640) but TestIVFFullDataset FN=1 FP=0 unchanged. **Bot returned FN=2** (vs FN=1 baseline) → −70 vs phase 21. Cross-platform f32 precision: darwin/arm64 generic kernel disagrees with linux/amd64 AVX2 at the borderline; smaller fast tier exposed an extra borderline entry to the drift. Reverted. **NPROBE changes are off-limits without amd64 validation infrastructure.** |
 | 24 | Kernel early-exit cadence 4/6/8 → 8 (single gate) | **5471** | 2.23ms | Issue #4092. Hypothesis: dim-4 partial sum is too noisy to reliably prune; gates cost ~4 cycles each, paid per block. Removed dim-4 and dim-6 checkpoints in both asm kernel and generic Go fallback. Result: **5471.03 vs phase 21's 5471.55 = pure noise (Δ −0.52)**. The early gates were either firing rarely or perfectly cancelling. Score-neutral, kept the change for code simplicity. |
 | 25 | QuantScale 32000 → 10000 (lossless for round4 input) | **5556.58** | 2.25ms | Issue #4228. Top-6 forensic deep dive (lecture 14) found references.json.gz pre-rounds every dim to 4 decimals, so int16 × 10000 is the data's native grid with 0 rounding loss; our int16 × 32000 had 48.4% per-dim rounding noise (verified empirically). FN went 1 → 0 as predicted. One new FP appeared (boundary entry shifted at the coarser grid), but FP weight=1 vs FN weight=3 → detection penalty dropped 180.62 → 90.31 = **+90.31 detection points**. Net **+85.03**. The "structural FN at memory budget" claim from phase 23 was retracted — the FN was a quantization-scale choice, not a memory limit. |
+| 26 | FastNProbe 16 → 1 + class-conditional escalation thresholds | **5618.55** | 2.41ms | Issue #4244. Matched luanlouzada's FAST_NPROBE=1 architecture. Calibrated thresholds via `cmd/calibrate` on linux/amd64 (THR[0]=3501931 — within 1 i64 unit of luanlouzada's published 3501932). Always-escalate count∈{2,3,4} + per-class worst-distance thresholds for count∈{0,1,5}. Bot result: **FP=0 FN=0** — detection score now SATURATED at 3000 (rate_component 3000, absolute_penalty 0). p99 regressed 2.25 → 2.41ms (escalation rate ~doubled vs phase 25's {2,3}-only gate, so the worst-1% pays the full K=4096 sweep more often). Net **+61.97** vs phase 25, **+147 vs phase 24 baseline**. Phase 25+26 closed the entire "structural" loss the journey had accepted. |
 
-## Final state
+## Current state (post phase 26)
 
-**Score: 5471.55 / 6000** (91.2% of max, phase 21 best). p99 2.23 ms, FP=0, FN=1, Err=0. Detection 2819.38/3000 (saturated modulo 1 structural FN). p99 2652.17/3000.
+**Score: 5618.55 / 6000** (93.6% of max). p99 2.41 ms, FP=0, FN=0, Err=0.
+**Detection saturated at 3000/3000** (no errors of any kind, rate_component
+3000, absolute_penalty 0). p99_score 2618.55/3000 — that's the only
+remaining gap.
 
 **Trajectory:**
 - Phase 13 baseline (grid + load shedder): 3823.65, p99 99.25ms — rank 86
 - Phase 20 (IVF + AVX2 + SCM_RIGHTS + mmap + warmup): 5448.88, p99 2.35ms
-- **Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms** — best
-- Phase 24 (cadence simplification): 5471.03, p99 2.23ms — score-neutral, code cleaner
+- Phase 21 (radius pre-prune + asm prefetch): 5471.55, p99 2.23ms
+- Phase 24 (cadence simplification): 5471.03, p99 2.23ms
+- Phase 25 (QuantScale 32000 → 10000): 5556.58, p99 2.25ms — FN 1 → 0
+- **Phase 26 (FastNProbe 1 + class-cond thresholds): 5618.55, p99 2.41ms** — FP=FN=0, detection saturated
 
-**Net: +1647.90 points, p99 cut 44×.**
+**Net: +1795 points, p99 cut 41×.**
 
-**Plateau confirmed** at 5471 ± 1 across phases 21 and 24. Phases 22 and 23 both regressed; the cross-platform precision lesson eliminated NPROBE/cluster-selection changes from the safe-to-ship set without amd64 validation infrastructure.
+The 5471 plateau (phases 21–24) was retracted on 2026-05-13 when the
+top-6 forensic deep dive (lecture 14) found two structural mistakes:
+quantization scale wrong (cost 1 FN) and fast-tier strategy wrong
+(blocked the path to FP=0). Both fixed in phases 25 and 26.
+
+**Remaining gap to ranks 1-6 is entirely in p99.** At 2.41ms our
+p99_score is 2618.55; rank 6 (hvini, p99 1.16ms) scores ~2937 there.
+Closing that gap is the only thing left.
 
 ### Entry 5472 root cause (phase 23 investigation)
 
