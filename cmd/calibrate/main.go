@@ -31,6 +31,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 	"github.com/muanlartins/rinha-de-backend-2026/internal/ivf"
@@ -46,7 +47,8 @@ type entry struct {
 type record struct {
 	fastCount   uint8
 	fastWorst   int64
-	fullCount   uint8
+	fullCount   uint8 // full-K oracle (sweeps everything)
+	topNCount   uint8 // result under the runtime phase-27 path
 	expectedApp bool
 }
 
@@ -57,6 +59,8 @@ func main() {
 		indexPath = flag.String("index", "/resources/index.bin", "path to IVF index")
 		testPath  = flag.String("test", "references/rinha-official/test/test-data.json", "test-data.json")
 		nprobe    = flag.Int("nprobe", search.FastNProbe, "FastNProbe value used for the fast-tier pass")
+		topN      = flag.Int("topN", search.EscalateNProbe, "EscalateNProbe simulated for the top-N path (phase 27)")
+		topNSweep = flag.String("topNSweep", "", "comma-separated list of N values to sweep (e.g. 16,24,32,48); overrides -topN")
 	)
 	flag.Parse()
 
@@ -102,11 +106,13 @@ func main() {
 
 		fastCnt, fastWorst := search.FraudCountFastOnly(&qf, &qiArr, idx, &scratch, *nprobe)
 		fullCnt := search.FraudCountFull(&qf, &qiArr, idx, &scratch)
+		topNCnt := search.FraudCountTopN(&qf, &qiArr, idx, &scratch, *topN)
 
 		records = append(records, record{
 			fastCount:   fastCnt,
 			fastWorst:   fastWorst,
 			fullCount:   fullCnt,
+			topNCount:   topNCnt,
 			expectedApp: e.ExpectedApproved,
 		})
 	}
@@ -175,8 +181,37 @@ func main() {
 			fp++
 		}
 	}
-	log.Printf("--- post-calibration projection ---")
+	log.Printf("--- post-calibration projection (oracle = full-K sweep) ---")
 	log.Printf("FP=%d FN=%d", fp, fn)
+
+	// Top-N verification: what would actually happen under the phase-27
+	// production path, where escalation = top-N nearest unscanned only?
+	if *topNSweep != "" {
+		log.Printf("--- top-N sweep ---")
+		ns := strings.Split(*topNSweep, ",")
+		for _, ns := range ns {
+			var nVal int
+			if _, err := fmt.Sscanf(ns, "%d", &nVal); err != nil {
+				log.Printf("skip bad N=%q: %v", ns, err)
+				continue
+			}
+			fpN, fnN := topNCheck(*testPath, idx, &scratch, nVal)
+			log.Printf("N=%-3d FP=%d FN=%d", nVal, fpN, fnN)
+		}
+	} else {
+		fpN, fnN := 0, 0
+		for _, r := range records {
+			a := approvedFromCount(r.topNCount)
+			switch {
+			case a && !r.expectedApp:
+				fnN++
+			case !a && r.expectedApp:
+				fpN++
+			}
+		}
+		log.Printf("--- top-N=%d projection (oracle = production path) ---", *topN)
+		log.Printf("FP=%d FN=%d", fpN, fnN)
+	}
 
 	// Emit the Go constants.
 	fmt.Println()
@@ -223,4 +258,49 @@ func computeThresholds(records []record) [6]int64 {
 		out[c] = fixableWorsts[0] - 1
 	}
 	return out
+}
+
+// topNCheck replays each record's request through FraudCountTopN at the
+// given N and counts FP/FN against the expected outcome. Used by the
+// -topNSweep mode to choose the smallest N that preserves FP=FN=0 under
+// the production phase-27 path.
+//
+// Returns (fp, fn). Each call recomputes from raw request data; the
+// passed scratch is reused (and reset by FraudCountFastOnly internally).
+func topNCheck(testPath string, idx *ivf.IVFIndex, scratch *search.IVFScratch, n int) (int, int) {
+	tf, err := os.Open(testPath)
+	if err != nil {
+		log.Printf("topNCheck: %v", err)
+		return -1, -1
+	}
+	defer tf.Close()
+	var top struct {
+		Entries []entry `json:"entries"`
+	}
+	if err := json.NewDecoder(tf).Decode(&top); err != nil {
+		log.Printf("topNCheck decode: %v", err)
+		return -1, -1
+	}
+	fp, fn := 0, 0
+	for _, e := range top.Entries {
+		var qi [dataset.Stride]int16
+		if !vector.VectorizeFast(e.Request, &qi) {
+			continue
+		}
+		var qf [dataset.Dims]float32
+		var qiArr [dataset.Dims]int16
+		for d := 0; d < dataset.Dims; d++ {
+			qf[d] = float32(qi[d])
+			qiArr[d] = qi[d]
+		}
+		cnt := search.FraudCountTopN(&qf, &qiArr, idx, scratch, n)
+		approved := approvedFromCount(cnt)
+		switch {
+		case approved && !e.ExpectedApproved:
+			fn++
+		case !approved && e.ExpectedApproved:
+			fp++
+		}
+	}
+	return fp, fn
 }

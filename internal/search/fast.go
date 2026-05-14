@@ -45,7 +45,8 @@ func FraudCountFastOnly(
 // FraudCountFull runs the fast tier + unconditional sweep over all
 // remaining clusters. This is the most accurate result the IVF index
 // can produce (modulo f32 precision in the kernel). Used by calibrate
-// as the "oracle" against which fast-tier results are compared.
+// as the "oracle" against which fast-tier and top-N results are
+// compared.
 func FraudCountFull(
 	qf *[dataset.Dims]float32,
 	qi *[dataset.Dims]int16,
@@ -58,6 +59,46 @@ func FraudCountFull(
 			continue
 		}
 		scanCluster(c, qf, qi, idx, scratch)
+	}
+	return scratch.Top.FraudCount()
+}
+
+// FraudCountTopN runs the fast tier (FastNProbe clusters), then if the
+// escalation gate (count ∈ {2,3,4} or worst > ExtremeWorstThreshold[count])
+// triggers, scans the next escalateN nearest unscanned centroids — this
+// is the *production* phase-27 path. Used by calibrate to verify FP/FN
+// at the chosen N before shipping.
+func FraudCountTopN(
+	qf *[dataset.Dims]float32,
+	qi *[dataset.Dims]int16,
+	idx *ivf.IVFIndex,
+	scratch *IVFScratch,
+	escalateN int,
+) uint8 {
+	_, _ = FraudCountFastOnly(qf, qi, idx, scratch, FastNProbe)
+	count := scratch.Top.FraudCount()
+	needSweep := count == 2 || count == 3 || count == 4
+	if !needSweep {
+		thr := ExtremeWorstThreshold[count]
+		if thr > 0 && scratch.Top.WorstI64() > thr {
+			needSweep = true
+		}
+	}
+	if !needSweep {
+		return count
+	}
+	if escalateN > MaxNProbe {
+		escalateN = MaxNProbe
+	}
+	var escPicked [MaxNProbe]uint16
+	PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], escalateN, escPicked[:escalateN])
+	for i := 0; i < escalateN; i++ {
+		c := escPicked[i]
+		if c == ^uint16(0) {
+			break
+		}
+		scanCluster(c, qf, qi, idx, scratch)
+		scratch.Scanned[c/64] |= 1 << (c % 64)
 	}
 	return scratch.Top.FraudCount()
 }
