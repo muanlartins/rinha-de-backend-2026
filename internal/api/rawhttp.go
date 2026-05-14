@@ -121,6 +121,7 @@ func handleRawConn(conn net.Conn, h *Handler) {
 	bufRef := rawReadBufPool.Get().(*[]byte)
 	buf := *bufRef
 	used := 0
+	pos := 0 // start of next request inside buf (advances per request)
 	defer func() {
 		if cap(buf) <= maxRequestSize {
 			*bufRef = buf[:cap(buf)]
@@ -130,42 +131,61 @@ func handleRawConn(conn net.Conn, h *Handler) {
 
 	for {
 		var headEnd int
+		// Find header end in buf[pos:used]. Buffer may already contain
+		// data from a previous read (pipelined keep-alive).
 		for {
-			if used >= len(buf) {
-				if used >= maxRequestSize {
+			if idx := indexHeaderEnd(buf[pos:used]); idx >= 0 {
+				headEnd = pos + idx + 4
+				break
+			}
+			// Need more data. Compact + grow if needed.
+			if used == len(buf) {
+				if pos > 0 {
+					// Have leftover after pos. Compact.
+					copy(buf, buf[pos:used])
+					used -= pos
+					pos = 0
+				} else if used >= maxRequestSize {
 					return
+				} else {
+					nb := make([]byte, len(buf)*2)
+					copy(nb, buf[:used])
+					buf = nb
 				}
-				nb := make([]byte, len(buf)*2)
-				copy(nb, buf[:used])
-				buf = nb
 			}
 			n, err := conn.Read(buf[used:])
 			if n > 0 {
 				used += n
-				if idx := indexHeaderEnd(buf[:used]); idx >= 0 {
-					headEnd = idx + 4
-					break
-				}
+				continue
 			}
 			if err != nil {
 				return
 			}
 		}
 
-		path, contentLen := parseRequestLine(buf[:headEnd])
-		if contentLen > maxRequestSize-headEnd {
+		path, contentLen := parseRequestLine(buf[pos:headEnd])
+		if contentLen > maxRequestSize-(headEnd-pos) {
 			return
 		}
 		bodyEnd := headEnd + contentLen
 		for used < bodyEnd {
-			if used >= len(buf) {
-				nb := make([]byte, len(buf)*2)
-				copy(nb, buf[:used])
-				buf = nb
+			if used == len(buf) {
+				if pos > 0 {
+					copy(buf, buf[pos:used])
+					used -= pos
+					headEnd -= pos
+					bodyEnd -= pos
+					pos = 0
+				} else {
+					nb := make([]byte, len(buf)*2)
+					copy(nb, buf[:used])
+					buf = nb
+				}
 			}
 			n, err := conn.Read(buf[used:])
 			if n > 0 {
 				used += n
+				continue
 			}
 			if err != nil {
 				return
@@ -177,8 +197,16 @@ func handleRawConn(conn net.Conn, h *Handler) {
 			return
 		}
 
-		copy(buf, buf[bodyEnd:used])
-		used -= bodyEnd
+		// Phase 35a: advance pos instead of memmove. The next request's
+		// data (if pipelined) is already at buf[bodyEnd:used] and we'll
+		// pick it up on the next iteration without copying.
+		pos = bodyEnd
+		// Once we've drained pos == used, reset both to 0 so the next
+		// read fills from the buffer's start.
+		if pos == used {
+			pos = 0
+			used = 0
+		}
 	}
 }
 
