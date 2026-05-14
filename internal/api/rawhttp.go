@@ -111,6 +111,7 @@ func ServeFDChannel(fdCh <-chan int, h *Handler) {
 		if err != nil {
 			continue
 		}
+		tuneSCMConn(c)
 		go handleRawConn(c, h)
 	}
 }
