@@ -74,6 +74,29 @@ func main() {
 		runtime.GC()
 		handler.SetIndex(idx)
 		log.Printf("ready in %s (total since startup: %s)", time.Since(t1), time.Since(t0))
+
+		// Phase 35c (opt-in via STEADY_GC_OFF=1) — disable Go's
+		// automatic GC after warmup and instead run GC in a background
+		// goroutine on a fixed timer. The hot path has no heap
+		// escapes (verified via `go build -gcflags=-m` 2026-05-14)
+		// and IVFScratch + read buffers come from sync.Pool, so the
+		// heap should stay nearly flat during request handling. Auto
+		// GC firing mid-request adds 50-500 µs of STW pause; running
+		// it on a timer between requests removes that tail.
+		//
+		// Safety: GOMEMLIMIT=140MB is still enforced; if a leak
+		// surfaces, Go will GC anyway before OOM.
+		if os.Getenv("STEADY_GC_OFF") == "1" {
+			debug.SetGCPercent(-1)
+			log.Printf("steady-state GC disabled; periodic GC every 5s")
+			go func() {
+				t := time.NewTicker(5 * time.Second)
+				defer t.Stop()
+				for range t.C {
+					runtime.GC()
+				}
+			}()
+		}
 	}
 
 	select {}

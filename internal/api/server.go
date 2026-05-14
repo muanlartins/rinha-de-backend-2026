@@ -136,9 +136,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // request path (e.g. "/fraud-score"), body is the request body. Returns
 // the full HTTP/1.1 response bytes including status line and headers.
 func (h *Handler) RouteRaw(path, body []byte) []byte {
-	if len(path) == 11 && string(path) == "/fraud-score" {
-		// 11 != 12, intentional — fast-path comparison
-	}
+	// switch string(path) — Go compiler elides the byte→string allocation
+	// when the result is compared against a string literal in a switch.
 	switch string(path) {
 	case "/fraud-score":
 		return h.fraudScoreRaw(body)
