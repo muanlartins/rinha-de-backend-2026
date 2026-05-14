@@ -64,13 +64,15 @@ echo ">>> output: $RUN_DIR"
 
 # === build compose command ===
 COMPOSE=(docker compose -f "$SUBMISSION_DIR/docker-compose.yml")
-for override in "${EXTRA_OVERRIDES[@]}"; do
-    if [ ! -f "$override" ]; then
-        echo "error: override file $override not found" >&2
-        exit 1
-    fi
-    COMPOSE+=(-f "$override")
-done
+if [ ${#EXTRA_OVERRIDES[@]} -gt 0 ]; then
+    for override in "${EXTRA_OVERRIDES[@]}"; do
+        if [ ! -f "$override" ]; then
+            echo "error: override file $override not found" >&2
+            exit 1
+        fi
+        COMPOSE+=(-f "$override")
+    done
+fi
 
 # === ensure clean state ===
 echo ">>> tearing down any existing stack..."
@@ -143,7 +145,7 @@ cat > "$RUN_DIR/manifest.json" <<EOF
   "run_name":       "$RUN_NAME",
   "submission":     "$SUBMISSION_DIR",
   "submission_sha": "$SUB_SHA",
-  "overrides":      $(printf '%s\n' "${EXTRA_OVERRIDES[@]}" | jq -R . | jq -s .),
+  "overrides":      $(printf '%s\n' "${EXTRA_OVERRIDES[@]+"${EXTRA_OVERRIDES[@]}"}" | jq -R . | jq -s .),
   "started_utc":    "$START_TS",
   "ended_utc":      "$END_TS",
   "host": {
