@@ -75,6 +75,13 @@ Fixing this would require:
 
 The FN=1 is structural at this memory budget. Accepted.
 
+> **Update 2026-05-13:** the "structural" claim is wrong. The top-6 deep
+> dive (lecture 14) found that references.json.gz is pre-rounded to 4
+> decimals, so `int16 × 10000` is **lossless** while our `int16 × 32000`
+> introduces rounding on 48.4% of dim values. All five top int16
+> solutions use scale=10000; switching `QuantScale` from 32000 to 10000
+> should eliminate the FN=1 with zero memory cost. See lecture 14 § 3.
+
 ### Cross-platform precision lesson (phase 23 regression)
 
 Local tests on darwin/arm64 use the generic Go kernel (pure float math); production runs the AVX2+FMA asm kernel on linux/amd64. F32 rounding differs subtly between the two — usually within `kernelSafety = 65536` (and that's why we have the margin). But the SEARCH ALGORITHM is sensitive to the cluster ordering at the centroid-distance level, which is also computed in f32. With smaller NPROBE, the top-N closest centroids can include or exclude borderline candidates differently across platforms.
