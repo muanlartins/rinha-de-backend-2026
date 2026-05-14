@@ -80,13 +80,34 @@ func PickNextNUnscanned(dists []float32, scanned []uint64, n int, picked []uint1
 	}
 }
 
+// pickArgminScalar finds the index of the smallest float32 in dists.
+// Lowest-index wins on ties. Used as the argmin oracle by the parity
+// test and as the non-amd64 fallback for pickArgminFast.
+func pickArgminScalar(dists []float32) uint16 {
+	bestI := uint16(0)
+	bestD := dists[0]
+	for i := 1; i < len(dists); i++ {
+		if dists[i] < bestD {
+			bestD = dists[i]
+			bestI = uint16(i)
+		}
+	}
+	return bestI
+}
+
 // PickTopNCentroids selects the n smallest dists and writes their indices
 // into picked. dists has length K; n must be <= len(picked). The picked
 // slice is filled in ascending-by-distance order.
 //
-// Implementation: linear scan with sorted insertion into a small array.
-// O(K * n) — for K=4096 and n=8, that's 33k comparisons, trivial.
+// Production calls this with n == FastNProbe == 1 on every query; that
+// path goes through pickArgminFast (asm on amd64). For n > 1, we use
+// the linear-scan + sorted-insert path below — O(K*n), trivial at
+// K=4096, n≤8.
 func PickTopNCentroids(dists []float32, n int, picked []uint16) {
+	if n == 1 && len(picked) >= 1 {
+		picked[0] = pickArgminFast(dists)
+		return
+	}
 	if n > len(picked) {
 		n = len(picked)
 	}
