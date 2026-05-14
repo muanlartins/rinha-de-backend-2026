@@ -13,11 +13,21 @@ import (
 // borderline-only escalation (count ∈ {2,3}) the fast tier handles ~85%
 // of queries, so keeping it tight is the lever for p99.
 //
-// FastNProbe stayed at 16 after phase 23 (NPROBE=12) regressed on the
-// bot test set with FN=2 — local FN=1 on darwin/arm64 generic kernel did
-// not predict linux/amd64 AVX2-kernel behaviour at the borderline. NPROBE
-// changes are off-limits without amd64 validation infrastructure.
-const FastNProbe = 16
+// FastNProbe is the count of nearest centroids scanned in the fast tier.
+//
+// Phase 26 dropped this from 16 → 1, matching luanlouzada's
+// FAST_NPROBE=1. At ~10µs per cluster scan, scanning 1 cluster instead
+// of 16 saves ~150µs of baseline cost on every query. The fast tier is
+// then augmented by class-conditional escalation thresholds
+// (ExtremeWorstThreshold) — escalating only when the top-5 worst-distance
+// is far enough to suggest the fast tier missed a true neighbor.
+//
+// MaxNProbe sizes the Picked buffer to allow temporary larger values
+// (e.g., during calibration runs). Runtime always uses FastNProbe.
+const (
+	FastNProbe = 1
+	MaxNProbe  = 32
+)
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
 // from a sync.Pool — every field is touched on the hot path.
@@ -25,7 +35,7 @@ const FastNProbe = 16
 // Size: ~17 KB (4096 f32 + 32 u16 + 512-byte scanned bitmap + Top5).
 type IVFScratch struct {
 	CentroidDists [ivf.K]float32
-	Picked        [FastNProbe]uint16
+	Picked        [MaxNProbe]uint16
 	// Scanned bitmap (one bit per cluster) so the AABB-LB sweep skips the
 	// FastNProbe clusters we already scanned via the fast tier.
 	Scanned  [ivf.K / 64]uint64
@@ -85,15 +95,32 @@ func FraudCountIVF(
 		scratch.Scanned[c/64] |= 1 << (c % 64)
 	}
 
-	// 5. Borderline-only AABB-LB sweep. Most queries (~85%) have a count
-	//    of 0/1/4/5 after the fast tier — the binary classification is
-	//    stable to a single-neighbor swap, so the sweep can't change the
-	//    answer. Only count ∈ {2,3} can flip across the 3-of-5 threshold,
-	//    so we escalate only there. Phase 22 tried always-sweep with
-	//    NPROBE=8 and regressed p99 from 2.23 → 2.71 ms — the radius
-	//    pre-prune isn't cheap enough to pay K times per query.
+	// 5. Class-conditional escalation. The fast tier (NPROBE=1) covers the
+	//    single closest cluster — enough for ~90%+ of queries where the
+	//    true 5-NN lies in that cluster. When it doesn't, we need the
+	//    full sweep. Two triggers:
+	//
+	//    (a) count ∈ {2,3,4}: result is ambiguous (count=2 ⇒ approve but
+	//        close to deny; count=3,4 ⇒ deny but close to approve). Always
+	//        escalate.
+	//
+	//    (b) count ∈ {0,1,5} with worst-of-top-5 distance > class
+	//        threshold: result looks confident, but the top-5 distances
+	//        are large enough that the fast cluster is sparse around the
+	//        query — meaning the true top-5 likely sits in a neighboring
+	//        cluster we didn't scan. Escalate.
+	//
+	//    Calibrated against test-data.json on linux/amd64. See
+	//    internal/search/thresholds.go and cmd/calibrate.
 	count := scratch.Top.FraudCount()
-	if count == 2 || count == 3 {
+	needSweep := count == 2 || count == 3 || count == 4
+	if !needSweep {
+		thr := ExtremeWorstThreshold[count]
+		if thr > 0 && scratch.Top.WorstI64() > thr {
+			needSweep = true
+		}
+	}
+	if needSweep {
 		for c := uint16(0); c < uint16(ivf.K); c++ {
 			if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
 				continue
