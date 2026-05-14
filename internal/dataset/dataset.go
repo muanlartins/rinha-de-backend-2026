@@ -21,8 +21,15 @@ const (
 	Dims = 14
 	// Stride is the per-vector stride in the flat int16 slab.
 	Stride       = 14
-	QuantScale   = 32000
-	SentinelInt  = -32000
+	// QuantScale is the int16 scale factor for quantizing normalized
+	// dim values into int16. The dataset (references.json.gz) stores every
+	// dim pre-rounded to 4 decimals, so a 10000-scale grid is **lossless**:
+	// every value k/10000 maps to int16 k with no rounding. Phase 25
+	// moved this from 32000 → 10000 to eliminate the FN=1 caused by 48% of
+	// dim values being off-grid at 32000 (verified empirically against
+	// references.json.gz). See lecture 14 § 3.
+	QuantScale   = 10000
+	SentinelInt  = -10000
 	SentinelReal = -1.0
 )
 
