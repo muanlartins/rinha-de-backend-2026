@@ -39,11 +39,27 @@ package search
 // Note: class=0 threshold is within 1 i64 unit of luanlouzada's
 // published 3501932 — strong corroboration that both calibrations
 // converge to the same statistical boundary.
+// Phase 39 recalibration (FastNProbe=2, K=4096, EscalateNProbe=32):
+//   class=0 n=28878  fast_wrong=4   fixable=4    → threshold=3501931
+//   class=1 n=398    fast_wrong=18  fixable=18   → threshold=3780951
+//   class=2 n=751    fast_wrong=123 fixable=123  → always-escalate
+//   class=3 n=802    fast_wrong=140 fixable=140  → always-escalate
+//   class=4 n=413    fast_wrong=18  fixable=18   → always-escalate
+//   class=5 n=22858  fast_wrong=0   fixable=0    → no escalation needed (!)
+//
+// Escalation rate: 2253 / 54100 = 4.16 % (was 6.21 % at FastNProbe=1).
+// Projection FP=FN=0 under top-N=32 production path.
+//
+// Notable change from previous calibration: class=5 now has threshold=0
+// because FastNProbe=2 already produces the correct top-5 for every
+// confidently-fraud query. The 6 misclassifications at FastNProbe=1
+// (which previously required threshold=3375483) are all caught by the
+// 2nd cluster scan.
 var ExtremeWorstThreshold = [6]int64{
 	/* count=0 */ 3501931,
-	/* count=1 */ 3371673,
+	/* count=1 */ 3780951,
 	/* count=2 */ 0, // always-escalate (count gate)
 	/* count=3 */ 0, // always-escalate
 	/* count=4 */ 0, // always-escalate
-	/* count=5 */ 3375483,
+	/* count=5 */ 0, // FastNProbe=2 fast-tier perfect-accurate for class=5
 }

@@ -17,16 +17,16 @@ const (
 var rawhttpResponses [6][]byte
 
 // readyOK is the response for GET /ready when the dataset is loaded.
-var readyOK = []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+var readyOK = []byte("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok")
 
 // readyNotYet is the 503 for GET /ready while loading.
-var readyNotYet = []byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\nnot ready")
+var readyNotYet = []byte("HTTP/1.1 503 Service Unavailable\r\nConnection: keep-alive\r\nContent-Length: 9\r\n\r\nnot ready")
 
 // methodNotAllowed for non-POST on /fraud-score.
-var methodNotAllowed = []byte("HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+var methodNotAllowed = []byte("HTTP/1.1 405 Method Not Allowed\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n")
 
 // notFound for unknown paths.
-var notFound = []byte("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+var notFound = []byte("HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n")
 
 func init() {
 	bodies := [6]string{
@@ -44,8 +44,12 @@ func init() {
 
 func buildResp(body string) []byte {
 	clen := itoa(len(body))
-	out := make([]byte, 0, 64+len(body))
-	out = append(out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "...)
+	out := make([]byte, 0, 96+len(body))
+	// Phase 39 — Tier 1.4: explicit Connection: keep-alive header.
+	// HTTP/1.1 default is keep-alive but explicit header is a stronger
+	// hint to clients/proxies (especially k6) to reuse the connection
+	// and avoid spurious close+reopen cycles under high-RPS ramping.
+	out = append(out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: "...)
 	out = append(out, clen...)
 	out = append(out, "\r\n\r\n"...)
 	out = append(out, body...)
