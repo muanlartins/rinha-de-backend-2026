@@ -47,22 +47,6 @@ func LoadMmap(path string) (*IVFIndex, error) {
 	_ = unix.Madvise(data, unix.MADV_POPULATE_READ)
 	_ = unix.Madvise(data, unix.MADV_HUGEPAGE)
 
-	// Phase 39 — Tier 1.2: mlock to force pages permanently resident.
-	// Eliminates any chance of swap or eviction under memory pressure.
-	// Our cgroup gives us 165 MB; the 84 MB index easily fits with
-	// room for the Go heap. RLIMIT_MEMLOCK is usually 64 MB by default
-	// in Docker — if mlock fails, we just skip (madvise+populate_read
-	// already gives us residency for steady-state, just not enforced).
-	_ = unix.Mlock(data)
-
-	// Phase 39 — Tier 1.3: explicit page-stride read after MADV_WILLNEED /
-	// POPULATE_READ. POPULATE_READ schedules the fault but the OS may
-	// resolve it lazily; this loop forces every page resident NOW. Used
-	// by crepao-da-massa (src/index.hpp warm_pages). Cost: one memory-
-	// bandwidth pass over 84 MB at startup (~10 ms). Run before parsing
-	// so cache is warm when we build the slice views.
-	warmPages(data)
-
 	idx, err := parseMmappedIndex(data)
 	if err != nil {
 		_ = unix.Munmap(data)
@@ -158,30 +142,6 @@ func byteToInt16(b []byte) []int16 {
 	n := len(b) / 2
 	return unsafe.Slice((*int16)(unsafe.Pointer(&b[0])), n)
 }
-
-// warmPages walks the mmap region with a 4 KB-stride dummy read, forcing
-// the kernel page-fault handler to make every page resident NOW (rather
-// than lazily on first access). Loads `volatile` style: the accumulator
-// is read at the end so the compiler can't optimize the loop away.
-//
-// Cost: ~10 ms for an 84 MB index (1 byte per 4 KB page = ~20 000 reads,
-// each ~500 ns to page-fault and 1 ns to read after fault). One-shot at
-// startup. After this, all subsequent accesses hit RAM with zero faults.
-func warmPages(data []byte) {
-	const pageSize = 4096
-	var acc byte
-	for i := 0; i < len(data); i += pageSize {
-		acc ^= data[i]
-	}
-	// Read acc into a global so the compiler treats it as having a side
-	// effect (otherwise it could optimize the whole loop away under -O).
-	warmPagesAccumulator = acc
-}
-
-// warmPagesAccumulator is a sink to prevent dead-code elimination of
-// warmPages. The actual value is meaningless; only the assignment side
-// effect matters.
-var warmPagesAccumulator byte
 
 // silence unused-when-debugging warnings
 var _ = io.EOF

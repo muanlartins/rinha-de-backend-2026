@@ -10,11 +10,11 @@ import "github.com/muanlartins/rinha-de-backend-2026/internal/dataset"
 // (lanes 14-15 are zero-padded in the index but only lanes 0..13 are
 // touched here).
 //
-// Phase 39 attempted an AVX2 asm version of this function; it ran ~50%
-// SLOWER than the scalar Go (18.7 ns vs 12.05 ns on amd64 Docker)
-// because the Go compiler's autovectorizer produces excellent code for
-// this branchy switch-loop, and the asm pays for an unavoidable
-// horizontal-sum reduction at the end. Kept the scalar version.
+// We tested an AVX2 asm version (Phase 39); it ran ~50% slower than the
+// scalar Go (18.7 ns vs 12.05 ns on amd64 Docker) because the Go
+// compiler's autovectorizer produces excellent code for this branchy
+// switch-loop, and the asm pays an unavoidable horizontal-sum reduction
+// at the end. Kept the scalar version.
 func AABBLowerBoundF32(q *[dataset.Dims]float32, bmin, bmax *[16]int16) float32 {
 	var sum float32
 	for d := 0; d < dataset.Dims; d++ {
