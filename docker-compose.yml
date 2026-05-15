@@ -9,7 +9,6 @@ services:
       - API_CTRL_SOCKET=/var/run/rinha/api1.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
-      - STEADY_GC_OFF=1
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
@@ -34,7 +33,6 @@ services:
       - API_CTRL_SOCKET=/var/run/rinha/api2.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
-      - STEADY_GC_OFF=1
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
