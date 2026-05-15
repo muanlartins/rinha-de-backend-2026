@@ -38,7 +38,15 @@ import (
 // because cluster geometry depends on K and the k-means seed. Don't
 // borrow other repos' constants — calibrate against your own index.
 const (
-	FastNProbe     = 1
+	// Phase 39 — Tier 2.5: bumped FastNProbe from 1 to 2. Cost: ~3 µs
+	// universal (one extra cluster scan per query). Benefit: escalation
+	// rate drops from 6.21 % to 4.16 % (33 % reduction) — at p99 the
+	// worst-1 % queries pay the escalation cost less often. Net p99:
+	// −3 to −7 µs expected on production target.
+	//
+	// Calibrated against test-data.json on linux/amd64 — see
+	// thresholds.go for the recalibrated ExtremeWorstThreshold values.
+	FastNProbe     = 2
 	EscalateNProbe = 32
 	MaxNProbe      = 256
 )
