@@ -105,14 +105,11 @@ func ListenRaw(path string, h *Handler) error {
 // the net.Conn's own refcount. See docs/lectures/12-scm-rights.md.
 func ServeFDChannel(fdCh <-chan int, h *Handler) {
 	for fd := range fdCh {
-		f := os.NewFile(uintptr(fd), "scm-fd")
-		c, err := net.FileConn(f)
-		_ = f.Close()
-		if err != nil {
-			continue
-		}
-		tuneSCMConn(c)
-		go handleRawConn(c, h)
+		// adoptFD is platform-specific (rawfd_linux.go / rawfd_other.go).
+		// On linux: direct-syscall path via handleRawFD (Phase 37) —
+		// no net.Conn wrapping, no netpoller overhead.
+		// On other platforms: net.FileConn + handleRawConn fallback.
+		adoptFD(fd, h)
 	}
 }
 
