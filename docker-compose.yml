@@ -15,8 +15,6 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    security_opt:
-      - seccomp:unconfined
     deploy:
       resources:
         limits:
@@ -39,8 +37,6 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    security_opt:
-      - seccomp:unconfined
     deploy:
       resources:
         limits:
@@ -68,8 +64,6 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    security_opt:
-      - seccomp:unconfined
     deploy:
       resources:
         limits:
