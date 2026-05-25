@@ -55,7 +55,7 @@ package search
 // confidently-fraud query. The 6 misclassifications at FastNProbe=1
 // (which previously required threshold=3375483) are all caught by the
 // 2nd cluster scan.
-// Phase 40 recalibration (FastNProbe=2, K=4096, full-K-sweep escalation)
+// Phase 41 recalibration (FastNProbe=2, K=4096, EscalateNProbe=224 top-N)
 // against test-data.json updated 2026-05-20 (commit 9dd2c32 — fraud_count
 // 24058→23959, edge_case_count 797→645):
 //
@@ -66,12 +66,11 @@ package search
 //   class=4 n=365    fast_wrong=40   fixable=40   → always-escalate
 //   class=5 n=23026  fast_wrong=15   fixable=15   → threshold=91459358
 //
-// Escalation rate: 20307 / 54100 = 37.54%. Projection FP=0 FN=0 under the
-// full-K-sweep escalation path (cmd/calibrate verified). The class=5
-// threshold went from 0 ("never escalate", was perfect under old test) to
-// 91459358 because the updated test set surfaces 15 confidently-fraud-
-// looking queries whose true 5-NN are in clusters ranked beyond the
-// previous top-N=32 escalation set.
+// Escalation rate: 20307 / 54100 = 37.54%. Top-N sweep at N={32,48,64,96,
+// 128,160,192,224,256} showed N=224 is the smallest value reaching
+// FP=0 FN=0 under the production phase-27 path. Phase 40 used full-K
+// (4094 clusters) which was overkill — p99 ballooned to 2.82ms in the bot
+// run. Top-N=224 cuts escalation work ~18x while preserving accuracy.
 var ExtremeWorstThreshold = [6]int64{
 	/* count=0 */ 92128083,
 	/* count=1 */ 4592068,
