@@ -18,6 +18,8 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build -trimpath -pgo=auto -ldflags='-s -w' -o /out/api ./cmd/api && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
+    go build -trimpath -ldflags='-s -w' -o /out/lb ./cmd/lb && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 \
     go build -trimpath -o /out/build-index ./cmd/build-index
 
 # Pre-build the IVF index from references.json.gz so the runtime container
@@ -31,5 +33,6 @@ RUN mkdir -p /out/resources && \
 # --- runtime stage --------------------------------------------------------
 FROM scratch
 COPY --from=builder /out/api /api
+COPY --from=builder /out/lb /lb
 COPY --from=builder /out/resources/index.bin /resources/index.bin
 ENTRYPOINT ["/api"]
