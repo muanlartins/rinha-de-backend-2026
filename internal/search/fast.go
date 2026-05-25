@@ -102,3 +102,44 @@ func FraudCountTopN(
 	}
 	return scratch.Top.FraudCount()
 }
+
+// FraudCountTopNByClass is like FraudCountTopN but takes a per-class
+// escalation N. Used by calibrate to find the minimum N per class.
+func FraudCountTopNByClass(
+	qf *[dataset.Dims]float32,
+	qi *[dataset.Dims]int16,
+	idx *ivf.IVFIndex,
+	scratch *IVFScratch,
+	escalateN *[6]int,
+) uint8 {
+	_, _ = FraudCountFastOnly(qf, qi, idx, scratch, FastNProbe)
+	count := scratch.Top.FraudCount()
+	needSweep := count == 2 || count == 3 || count == 4
+	if !needSweep {
+		thr := ExtremeWorstThreshold[count]
+		if thr > 0 && scratch.Top.WorstI64() > thr {
+			needSweep = true
+		}
+	}
+	if !needSweep {
+		return count
+	}
+	n := escalateN[count]
+	if n > MaxNProbe {
+		n = MaxNProbe
+	}
+	if n <= 0 {
+		return count
+	}
+	var escPicked [MaxNProbe]uint16
+	PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], n, escPicked[:n])
+	for i := 0; i < n; i++ {
+		c := escPicked[i]
+		if c == ^uint16(0) {
+			break
+		}
+		scanCluster(c, qf, qi, idx, scratch)
+		scratch.Scanned[c/64] |= 1 << (c % 64)
+	}
+	return scratch.Top.FraudCount()
+}
