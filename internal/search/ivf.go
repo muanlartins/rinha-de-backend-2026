@@ -143,24 +143,19 @@ func FraudCountIVF(
 		}
 	}
 	if needSweep {
-		// Phase 27 — top-N escalation instead of full K-sweep.
-		// PickNextNUnscanned reuses CentroidDists computed in step 1,
-		// picks the next EscalateNProbe smallest-distance clusters that
-		// weren't already scanned by the fast tier. The triangle-inequality
-		// and AABB-LB filters inside scanCluster still prune most of them.
-		//
-		// Old behaviour: iterate all K=4096 clusters with AABB-LB pre-prune.
-		// New behaviour: iterate top-24 by centroid distance.
-		//
-		// Calibration in cmd/calibrate must run with this path active to
-		// re-prove FP=0 FN=0. If a true 5-NN sits in a cluster ranked
-		// beyond EscalateNProbe by centroid distance, this path misses it.
-		// Calibrate verifies that doesn't happen at our chosen N.
-		var escPicked [EscalateNProbe]uint16
-		PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], EscalateNProbe, escPicked[:])
-		for _, c := range escPicked {
-			if c == ^uint16(0) {
-				break
+		// Full sweep over all unscanned clusters. scanCluster's
+		// triangle-inequality + AABB-LB pre-prune drops 99%+ of clusters in
+		// O(dims) before any block scan, so the cost is dominated by the
+		// few clusters whose AABB actually contains a candidate closer than
+		// the current worst-of-top-5. Top-N escalation (the previous
+		// approach) capped at the N nearest by centroid distance, which
+		// misses clusters whose centroid is far from q but whose bounding
+		// box reaches close — exactly the cases that produced FP=18 FN=1
+		// on the 2026-05-20 updated test set even at N=256.
+		K := uint16(idx.K)
+		for c := uint16(0); c < K; c++ {
+			if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
+				continue
 			}
 			scanCluster(c, qf, qi, idx, scratch)
 			scratch.Scanned[c/64] |= 1 << (c % 64)
