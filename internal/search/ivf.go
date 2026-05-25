@@ -38,16 +38,8 @@ import (
 // because cluster geometry depends on K and the k-means seed. Don't
 // borrow other repos' constants — calibrate against your own index.
 const (
-	// Phase 39 — Tier 2.5: bumped FastNProbe from 1 to 2. Cost: ~3 µs
-	// universal (one extra cluster scan per query). Benefit: escalation
-	// rate drops from 6.21 % to 4.16 % (33 % reduction) — at p99 the
-	// worst-1 % queries pay the escalation cost less often. Net p99:
-	// −3 to −7 µs expected on production target.
-	//
-	// Calibrated against test-data.json on linux/amd64 — see
-	// thresholds.go for the recalibrated ExtremeWorstThreshold values.
 	FastNProbe     = 2
-	EscalateNProbe = 32
+	EscalateNProbe = 224
 	MaxNProbe      = 256
 )
 
@@ -143,19 +135,11 @@ func FraudCountIVF(
 		}
 	}
 	if needSweep {
-		// Full sweep over all unscanned clusters. scanCluster's
-		// triangle-inequality + AABB-LB pre-prune drops 99%+ of clusters in
-		// O(dims) before any block scan, so the cost is dominated by the
-		// few clusters whose AABB actually contains a candidate closer than
-		// the current worst-of-top-5. Top-N escalation (the previous
-		// approach) capped at the N nearest by centroid distance, which
-		// misses clusters whose centroid is far from q but whose bounding
-		// box reaches close — exactly the cases that produced FP=18 FN=1
-		// on the 2026-05-20 updated test set even at N=256.
-		K := uint16(idx.K)
-		for c := uint16(0); c < K; c++ {
-			if scratch.Scanned[c/64]&(1<<(c%64)) != 0 {
-				continue
+		PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], EscalateNProbe, scratch.Picked[:EscalateNProbe])
+		for i := 0; i < EscalateNProbe; i++ {
+			c := scratch.Picked[i]
+			if c == ^uint16(0) {
+				break
 			}
 			scanCluster(c, qf, qi, idx, scratch)
 			scratch.Scanned[c/64] |= 1 << (c % 64)
