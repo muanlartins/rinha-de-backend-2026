@@ -55,11 +55,28 @@ package search
 // confidently-fraud query. The 6 misclassifications at FastNProbe=1
 // (which previously required threshold=3375483) are all caught by the
 // 2nd cluster scan.
+// Phase 40 recalibration (FastNProbe=2, K=4096, full-K-sweep escalation)
+// against test-data.json updated 2026-05-20 (commit 9dd2c32 — fraud_count
+// 24058→23959, edge_case_count 797→645):
+//
+//   class=0 n=29158  fast_wrong=5    fixable=5    → threshold=92128083
+//   class=1 n=301    fast_wrong=25   fixable=25   → threshold=4592068
+//   class=2 n=657    fast_wrong=134  fixable=134  → always-escalate
+//   class=3 n=593    fast_wrong=134  fixable=134  → always-escalate
+//   class=4 n=365    fast_wrong=40   fixable=40   → always-escalate
+//   class=5 n=23026  fast_wrong=15   fixable=15   → threshold=91459358
+//
+// Escalation rate: 20307 / 54100 = 37.54%. Projection FP=0 FN=0 under the
+// full-K-sweep escalation path (cmd/calibrate verified). The class=5
+// threshold went from 0 ("never escalate", was perfect under old test) to
+// 91459358 because the updated test set surfaces 15 confidently-fraud-
+// looking queries whose true 5-NN are in clusters ranked beyond the
+// previous top-N=32 escalation set.
 var ExtremeWorstThreshold = [6]int64{
-	/* count=0 */ 3501931,
-	/* count=1 */ 3780951,
+	/* count=0 */ 92128083,
+	/* count=1 */ 4592068,
 	/* count=2 */ 0, // always-escalate (count gate)
 	/* count=3 */ 0, // always-escalate
 	/* count=4 */ 0, // always-escalate
-	/* count=5 */ 0, // FastNProbe=2 fast-tier perfect-accurate for class=5
+	/* count=5 */ 91459358,
 }

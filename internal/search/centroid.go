@@ -60,8 +60,8 @@ func PickNextNUnscanned(dists []float32, scanned []uint64, n int, picked []uint1
 	// Heap state. heapDist[i] is the f32 distance currently at heap slot
 	// i; heapIdx[i] is the cluster id. The root (slot 0) is the largest
 	// distance in the current top-n. Empty heap is signalled by heapSize.
-	var heapDist [64]float32
-	var heapIdx [64]uint16
+	var heapDist [MaxNProbe]float32
+	var heapIdx [MaxNProbe]uint16
 	heapSize := 0
 	worst := float32(1e38) // = root once heap is full
 
