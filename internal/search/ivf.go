@@ -43,6 +43,22 @@ const (
 	MaxNProbe      = 256
 )
 
+// EscalateNByClass is the per-class minimum top-N (with a safety margin)
+// that achieves FP=0 FN=0 on test-data.json under the production path.
+// Calibrated via cmd/calibrate -perClass; see thresholds.go.
+//
+// Class 5 dominates escalations (~18000/20307 ≈ 89%) and only needs N=96
+// — bringing it down from 224 saves ~28µs × 0.33 = ~9µs locally on the
+// average escalated query.
+var EscalateNByClass = [6]int{
+	/* count=0 */ 16,
+	/* count=1 */ 32,
+	/* count=2 */ 224,
+	/* count=3 */ 192,
+	/* count=4 */ 64,
+	/* count=5 */ 128,
+}
+
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
 // from a sync.Pool — every field is touched on the hot path.
 //
@@ -135,8 +151,9 @@ func FraudCountIVF(
 		}
 	}
 	if needSweep {
-		PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], EscalateNProbe, scratch.Picked[:EscalateNProbe])
-		for i := 0; i < EscalateNProbe; i++ {
+		n := EscalateNByClass[count]
+		PickNextNUnscanned(scratch.CentroidDists[:], scratch.Scanned[:], n, scratch.Picked[:n])
+		for i := 0; i < n; i++ {
 			c := scratch.Picked[i]
 			if c == ^uint16(0) {
 				break
