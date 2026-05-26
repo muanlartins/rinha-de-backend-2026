@@ -38,7 +38,7 @@ import (
 // because cluster geometry depends on K and the k-means seed. Don't
 // borrow other repos' constants — calibrate against your own index.
 const (
-	FastNProbe     = 2
+	FastNProbe     = 8
 	EscalateNProbe = 224
 	MaxNProbe      = 256
 )
@@ -51,12 +51,12 @@ const (
 // — bringing it down from 224 saves ~28µs × 0.33 = ~9µs locally on the
 // average escalated query.
 var EscalateNByClass = [6]int{
-	/* count=0 */ 16,
-	/* count=1 */ 32,
-	/* count=2 */ 224,
-	/* count=3 */ 192,
-	/* count=4 */ 64,
-	/* count=5 */ 128,
+	/* count=0 */ 8,   // no escalation at NPROBE=8 (threshold=0)
+	/* count=1 */ 8,   // no escalation at NPROBE=8 (threshold=0)
+	/* count=2 */ 32,  // min-N=24 + safety margin
+	/* count=3 */ 224, // min global N=192; per-class sweep capped at 128 so FP=2 — use safe bound
+	/* count=4 */ 64,  // min-N=48 + safety margin
+	/* count=5 */ 16,  // min-N=8 + safety margin (only 1 fixable)
 }
 
 // IVFScratch holds per-handler reusable buffers. Allocate one per request
