@@ -47,6 +47,26 @@ func LoadMmap(path string) (*IVFIndex, error) {
 	_ = unix.Madvise(data, unix.MADV_POPULATE_READ)
 	_ = unix.Madvise(data, unix.MADV_HUGEPAGE)
 
+	// MADV_POPULATE_READ is best-effort and the kernel may defer the
+	// page-in. Force every page resident with an explicit read sweep —
+	// touch one byte per 4 KB page so the page-cache load is synchronous
+	// before we start serving requests. Cheap (~10 ms for 84 MB) and
+	// removes the cold-page tail in the first hundred queries.
+	prefaultSum := byte(0)
+	for i := 0; i < len(data); i += 4096 {
+		prefaultSum ^= data[i]
+	}
+	prefaultBlackhole(prefaultSum)
+
+	// mlock the entire mapping so the kernel can't evict pages under
+	// memory pressure (the bot's Mac Mini runs us alongside k6 + dockerd;
+	// without mlock we've seen 50–500 µs tails on individual cluster
+	// scans when a page faults back in). Requires RLIMIT_MEMLOCK headroom
+	// in the container; compose sets memlock soft/hard to the index size.
+	// Best-effort: if mlock returns EPERM (limit too low) we silently
+	// continue — the MADV_POPULATE_READ + pre-fault still help.
+	_ = unix.Mlock(data)
+
 	idx, err := parseMmappedIndex(data)
 	if err != nil {
 		_ = unix.Munmap(data)
@@ -55,6 +75,11 @@ func LoadMmap(path string) (*IVFIndex, error) {
 	ComputeRadii(idx)
 	return idx, nil
 }
+
+//go:noinline
+func prefaultBlackhole(b byte) { prefaultSink = b }
+
+var prefaultSink byte
 
 // parseMmappedIndex constructs IVFIndex slices as unsafe views into the
 // mmap'd region. Caller keeps idx.raw alive so the mapping stays valid.

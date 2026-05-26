@@ -15,7 +15,7 @@ import (
 
 const (
 	indexPath   = "/resources/index.bin"
-	warmupIters = 500
+	warmupIters = 2000
 )
 
 func main() {
