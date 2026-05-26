@@ -4,17 +4,22 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-api-1
+    cpuset: "0"
     environment:
       - API_SOCKET=/var/run/rinha/api1.sock
       - API_CTRL_SOCKET=/var/run/rinha/api1.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
+      - STEADY_GC_OFF=1
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
+      memlock:
+        soft: 134217728
+        hard: 134217728
     deploy:
       resources:
         limits:
@@ -26,17 +31,22 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-api-2
+    cpuset: "1"
     environment:
       - API_SOCKET=/var/run/rinha/api2.sock
       - API_CTRL_SOCKET=/var/run/rinha/api2.sock.ctrl
       - SHED_SLOTS=4
       - SHED_TIMEOUT_MS=3
+      - STEADY_GC_OFF=1
     volumes:
       - socket-dir:/var/run/rinha
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
+      memlock:
+        soft: 134217728
+        hard: 134217728
     deploy:
       resources:
         limits:
@@ -48,6 +58,7 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-lb
+    cpuset: "0,1"
     entrypoint: ["/lb"]
     environment:
       - LB_PORT=9999
