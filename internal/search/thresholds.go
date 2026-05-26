@@ -71,11 +71,23 @@ package search
 // FP=0 FN=0 under the production phase-27 path. Phase 40 used full-K
 // (4094 clusters) which was overkill — p99 ballooned to 2.82ms in the bot
 // run. Top-N=224 cuts escalation work ~18x while preserving accuracy.
+// Phase 45 — FastNProbe=8 recalibration (NPROBE=8 covers fast_wrong=0 for
+// classes {0,1}; class=5 has only 1 fixable; classes {2,3,4} stay always-
+// escalate via the count gate):
+//
+//   class=0 n=29153  fast_wrong=0  → threshold=0 (no escalation)
+//   class=1 n=295    fast_wrong=0  → threshold=0
+//   class=2 n=683    fast_wrong=16 → always-escalate
+//   class=3 n=636    fast_wrong=20 → always-escalate
+//   class=4 n=375    fast_wrong=5  → always-escalate
+//   class=5 n=22958  fast_wrong=1  → threshold=100905918
+//
+// Escalation rate: 5146 / 54100 = 9.51% (down from 37.54% at NPROBE=2).
 var ExtremeWorstThreshold = [6]int64{
-	/* count=0 */ 92128083,
-	/* count=1 */ 4592068,
+	/* count=0 */ 0,
+	/* count=1 */ 0,
 	/* count=2 */ 0, // always-escalate (count gate)
 	/* count=3 */ 0, // always-escalate
 	/* count=4 */ 0, // always-escalate
-	/* count=5 */ 91459358,
+	/* count=5 */ 100905918,
 }
