@@ -54,8 +54,8 @@ var EscalateNByClass = [6]int{
 	/* count=0 */ 8,   // no escalation at NPROBE=8 (threshold=0)
 	/* count=1 */ 8,   // no escalation at NPROBE=8 (threshold=0)
 	/* count=2 */ 32,  // min-N=24 + safety margin
-	/* count=3 */ 224, // min global N=192; per-class sweep capped at 128 so FP=2 — use safe bound
-	/* count=4 */ 64,  // min-N=48 + safety margin
+	/* count=3 */ 192, // exact min (per-class fine sweep N=176 still FP=1, N=192 FP=0)
+	/* count=4 */ 56,  // min-N=48 + small safety margin
 	/* count=5 */ 16,  // min-N=8 + safety margin (only 1 fixable)
 }
 
