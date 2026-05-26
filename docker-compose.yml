@@ -4,7 +4,6 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-api-1
-    cpuset: "0"
     environment:
       - API_SOCKET=/var/run/rinha/api1.sock
       - API_CTRL_SOCKET=/var/run/rinha/api1.sock.ctrl
@@ -31,7 +30,6 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-api-2
-    cpuset: "1"
     environment:
       - API_SOCKET=/var/run/rinha/api2.sock
       - API_CTRL_SOCKET=/var/run/rinha/api2.sock.ctrl
@@ -58,7 +56,6 @@ services:
     pull_policy: always
     platform: linux/amd64
     container_name: rinha-go-lb
-    cpuset: "0,1"
     entrypoint: ["/lb"]
     environment:
       - LB_PORT=9999
